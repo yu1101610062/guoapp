@@ -329,10 +329,14 @@ class _AppShellState extends State<AppShell> {
           ),
           Expanded(
             child: RepaintBoundary(
-              child: MediaQuery.removePadding(
-                context: context,
-                removeLeft: true,
-                child: pages,
+              child: Builder(
+                // Read the body's MediaQuery after Scaffold consumes the
+                // keyboard inset; the outer context would apply it twice.
+                builder: (bodyContext) => MediaQuery.removePadding(
+                  context: bodyContext,
+                  removeLeft: true,
+                  child: pages,
+                ),
               ),
             ),
           ),

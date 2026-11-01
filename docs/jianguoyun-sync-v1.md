@@ -2,7 +2,7 @@
 
 ## 使用
 
-首批目标为 Windows 和 Android 手机/平板，必须同时构建 Flutter 和 Go 的全站源版本。正式版本为 `1.0.3+104`；不传 `--sync-test` 时，Android 应用 ID 保持 `com.duanju.duanju_app`，名称为“真果鉴”，使用原数据目录、偏好前缀和原生核心配置。
+首批目标为 Windows 和 Android 手机/平板，必须同时构建 Flutter 和 Go 的全站源版本。当前正式版本为 `1.0.4+105`，修复平板/窗口布局中弹出软键盘后设置表单变空的问题；不传 `--sync-test` 时，Android 应用 ID 保持 `com.duanju.duanju_app`，名称为“真果鉴”，使用原数据目录、偏好前缀和原生核心配置。
 
 此前的独立测试版为 `1.0.3-sync.1+103`：Android 应用 ID 是 `com.duanju.duanju_app.syncdev`，名称为“真果鉴（同步测试）”；Windows 测试数据位于 `sync-test-v1/`，偏好、原生核心和下载目录也独立。测试版的云端绑定不会自动复制到正式版，正式版需为相应本地用户连接云端资料并确认合并。
 
