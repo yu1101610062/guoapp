@@ -13,6 +13,7 @@ val dartDefines = providers.gradleProperty("dart-defines").orNull.orEmpty()
         decoded.substringBefore("=") to decoded.substringAfter("=", "")
     }
 val allSources = dartDefines["ALL_SOURCES"] == "true"
+val syncTest = dartDefines["SYNC_TEST_BUILD"] == "true"
 
 val releaseKey = rootProject.file("key.properties")
 val releaseProperties = Properties()
@@ -40,11 +41,13 @@ android {
 
     defaultConfig {
         applicationId = "com.duanju.duanju_app"
+        if (syncTest) applicationIdSuffix = ".syncdev"
         minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         manifestPlaceholders["appLabel"] = if (allSources) "真果鉴" else "红果鉴"
+        if (syncTest) manifestPlaceholders["appLabel"] = "真果鉴（同步测试）"
         manifestPlaceholders["appBanner"] = if (allSources) "@drawable/tv_banner_all_sources" else "@drawable/tv_banner"
     }
 

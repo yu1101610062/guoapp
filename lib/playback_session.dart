@@ -14,6 +14,7 @@ import 'playback_loader.dart';
 import 'playback_preferences.dart';
 import 'playback_preloader.dart';
 import 'playback_recovery.dart';
+import 'sync/sync_state.dart';
 
 Size? videoDisplaySize(VideoParams parameters) {
   final width = (parameters.dw ?? 0) > 0 ? parameters.dw! : parameters.w ?? 0;
@@ -50,6 +51,7 @@ class PlaybackSession extends ChangeNotifier {
     _speed = preferences.speed;
     _quality = preferences.quality;
     _danmakuEnabled = preferences.danmaku;
+    _autoAdvance = preferences.autoAdvance;
     _loader = PlaybackLoader(repository);
     _preloader = PlaybackPreloader(repository)..addListener(_prime);
     danmaku = DanmakuController(repository)..setEnabled(_danmakuEnabled);
@@ -95,7 +97,10 @@ class PlaybackSession extends ChangeNotifier {
         _sync();
       }),
       stream.playing.listen((playing) {
-        if (!playing) endBoost();
+        if (!playing) {
+          endBoost();
+          unawaited(saveProgress(urgent: true));
+        }
         _sync();
       }),
       stream.buffering.listen((buffering) {
@@ -117,6 +122,8 @@ class PlaybackSession extends ChangeNotifier {
   final AppRepository repository;
   final LocalStore store;
   final DramaDetail detail;
+  final String _watchSession = newSyncId();
+  late final bool _autoAdvance;
   Player _player;
   Player? _standby;
   late final DanmakuController danmaku;
@@ -210,14 +217,6 @@ class PlaybackSession extends ChangeNotifier {
 
   bool get _usable => !_closed && store.profileEpoch == _epoch;
   bool _current(int ticket) => _usable && ticket == _generation;
-
-  PlaybackPreferences get _preferences => store.playbackPreferences.copyWith(
-    speed: _speed,
-    quality: _quality,
-    danmaku: _danmakuEnabled,
-    autoAdvance: true,
-    preload: true,
-  );
 
   double get _rate => _boosting ? 2 : _speed;
 
@@ -336,13 +335,13 @@ class PlaybackSession extends ChangeNotifier {
     if (duration <= Duration.zero ||
         player.state.position < duration - const Duration(seconds: 2)) {
       _queueRecovery('early_completion');
-    } else if (_foreground && hasNext) {
+    } else if (_foreground && hasNext && _autoAdvance) {
       unawaited(play(_index + 1));
     } else {
       _playIntent = false;
       endBoost();
       unawaited(player.pause());
-      unawaited(saveProgress());
+      unawaited(saveProgress(urgent: true));
     }
   }
 
@@ -396,7 +395,7 @@ class PlaybackSession extends ChangeNotifier {
       await _serialize(() async {
         if (!_current(ticket)) return;
         try {
-          await saveProgress();
+          await saveProgress(urgent: true);
           _openedIndex = -1;
           await player.stop();
         } finally {
@@ -518,7 +517,7 @@ class PlaybackSession extends ChangeNotifier {
     try {
       await _serialize(() async {
         if (!_current(ticket)) return;
-        await saveProgress();
+        await saveProgress(urgent: true);
         if (!_current(ticket)) return;
         _openedIndex = -1;
         await player.stop();
@@ -604,7 +603,7 @@ class PlaybackSession extends ChangeNotifier {
     final previous = _player;
     final previousPlan = _plan;
     final volume = previous.state.volume;
-    unawaited(saveProgress());
+    unawaited(saveProgress(urgent: true));
     _preloader.clear();
     final ticket = ++_generation;
     _seekSequence++;
@@ -755,7 +754,7 @@ class PlaybackSession extends ChangeNotifier {
     } else {
       unawaited(player.playOrPause());
     }
-    if (!_playIntent) unawaited(saveProgress());
+    if (!_playIntent) unawaited(saveProgress(urgent: true));
     _syncDanmaku();
   }
 
@@ -879,7 +878,7 @@ class PlaybackSession extends ChangeNotifier {
 
   Future<void> setSpeed(double value) async {
     if (value == _speed) return;
-    await _savePreferences(_preferences.copyWith(speed: value));
+    await _savePreferences(store.playbackPreferences.copyWith(speed: value));
     _speed = value;
     _notify();
     if (!_boosting) await _setRate(value);
@@ -887,7 +886,7 @@ class PlaybackSession extends ChangeNotifier {
 
   Future<void> setQuality(int value) async {
     if (value == _quality) return;
-    await _savePreferences(_preferences.copyWith(quality: value));
+    await _savePreferences(store.playbackPreferences.copyWith(quality: value));
     _quality = value;
     _preloader.clear();
     _notify();
@@ -902,7 +901,9 @@ class PlaybackSession extends ChangeNotifier {
   Future<void> toggleDanmaku() async {
     if (!danmakuSupported) return;
     final enabled = !_danmakuEnabled;
-    await _savePreferences(_preferences.copyWith(danmaku: enabled));
+    await _savePreferences(
+      store.playbackPreferences.copyWith(danmaku: enabled),
+    );
     _danmakuEnabled = enabled;
     danmaku.setEnabled(enabled);
     _syncDanmaku();
@@ -918,28 +919,38 @@ class PlaybackSession extends ChangeNotifier {
       endBoost();
       _playIntent = false;
       unawaited(player.pause());
-      unawaited(saveProgress());
+      unawaited(saveProgress(urgent: true));
     } else if (_pendingError) {
       _queueRecovery('foreground_pending_error');
     }
   }
 
-  Future<void> saveProgress() async {
+  Future<void> saveProgress({bool urgent = false}) async {
     if (!_engaged || _openedIndex < 0 || store.profileEpoch != _epoch) return;
     final position = player.state.position.inMilliseconds / 1000;
     final duration = player.state.duration.inMilliseconds / 1000;
     if (position < .1) return;
     final key = '${detail.drama.id}:$_openedIndex:$position:$duration';
-    if (_savedProgressKey == key && _saveWarning == null) return;
+    if (_savedProgressKey == key && _saveWarning == null) {
+      if (urgent) store.syncHooks?.changed(urgent: true);
+      return;
+    }
     final entry = WatchEntry(
       drama: repository.catalogUpdates.current(detail.drama),
       episode: detail.episodes[_openedIndex].number,
       position: position,
       duration: duration,
       updatedAt: DateTime.now(),
+      episodeId: detail.episodes[_openedIndex].id.isEmpty
+          ? null
+          : detail.episodes[_openedIndex].id,
+      sessionId: _watchSession,
     );
     try {
       await store.saveWatch(entry);
+      if (urgent && store.profileEpoch == _epoch) {
+        store.syncHooks?.changed(urgent: true);
+      }
       _savedProgressKey = key;
       if (_saveWarning != null) {
         _saveWarning = null;
@@ -955,7 +966,7 @@ class PlaybackSession extends ChangeNotifier {
 
   @override
   void dispose() {
-    unawaited(saveProgress());
+    unawaited(saveProgress(urgent: true));
     _closed = true;
     _generation++;
     store.removeListener(_accessChanged);

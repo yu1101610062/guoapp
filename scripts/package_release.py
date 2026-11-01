@@ -18,7 +18,7 @@ parser.add_argument('--identity', default='',
                     help='macOS 签名身份；默认 ad-hoc 签名（-），有 Developer ID 时传证书名')
 add_variant_argument(parser)
 options = parser.parse_args()
-variant = BuildVariant(options.all_sources)
+variant = BuildVariant(options.all_sources, options.sync_test)
 match = re.search(r'^version:\s*([\w.+-]+)\s*$', (root / 'pubspec.yaml').read_text(encoding='utf-8'), re.MULTILINE)
 if not match:
     raise SystemExit('pubspec.yaml 缺少合法版本号。')

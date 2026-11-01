@@ -77,7 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description='构建红果鉴 / 真果鉴 macOS 应用与 dmg')
     add_variant_argument(parser)
     options = parser.parse_args()
-    variant = BuildVariant(options.all_sources)
+    variant = BuildVariant(options.all_sources, options.sync_test)
     if platform.system() != 'Darwin':
         raise SystemExit('macOS 构建需要 macOS 与完整 Xcode。')
     env = toolchain_environment(developer_directory())

@@ -14,6 +14,7 @@ import 'core_bridge.dart';
 import 'diary_service.dart';
 import 'local_files.dart';
 import 'local_store.dart';
+import 'sync/sync_controller.dart';
 import 'picture_in_picture.dart';
 import 'ui/app.dart';
 import 'ui/theme/app_theme.dart';
@@ -21,6 +22,9 @@ import 'window_frame.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (const bool.fromEnvironment('SYNC_TEST_BUILD')) {
+    SharedPreferences.setPrefix('zhenguojian_sync_test.');
+  }
   if (Platform.isAndroid) {
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(AppTheme.systemBars(Brightness.dark));
@@ -68,6 +72,7 @@ class _AppBootstrapState extends State<AppBootstrap>
     with WidgetsBindingObserver {
   final repository = NativeRepository();
   LocalStore? store;
+  SyncController? sync;
   Object? error;
   late AppDevice device = widget.device;
 
@@ -81,12 +86,19 @@ class _AppBootstrapState extends State<AppBootstrap>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    sync?.dispose();
     store?.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) sync?.foreground(true);
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      sync?.foreground(false);
+    }
     if (state == AppLifecycleState.resumed && Platform.isAndroid) {
       unawaited(_refreshDevice());
     }
@@ -120,9 +132,19 @@ class _AppBootstrapState extends State<AppBootstrap>
       final support = await getApplicationSupportDirectory();
       final local = await LocalStore.open(
         preferences,
-        LocalFiles(Directory(path.join(support.path, 'store'))),
+        LocalFiles(
+          Directory(
+            path.joinAll([
+              support.path,
+              if (const bool.fromEnvironment('SYNC_TEST_BUILD')) 'sync-test-v1',
+              'store',
+            ]),
+          ),
+        ),
       );
       if (!mounted) return;
+      sync?.dispose();
+      sync = SyncController(local);
       setState(() {
         store = local;
         repository.access = local;

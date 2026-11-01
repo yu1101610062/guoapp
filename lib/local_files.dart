@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as path;
+import 'sync/sync_state.dart';
 
 class LocalFiles {
   LocalFiles(this.root);
@@ -9,6 +10,22 @@ class LocalFiles {
   static const marker = 'users.json';
 
   final Directory root;
+
+  Future<String> installationId() async {
+    final identity = File('${root.path}.device.json');
+    if (!await identity.exists()) {
+      await identity.parent.create(recursive: true);
+      await identity.writeAsString(newSyncId(), flush: true);
+    }
+    final id = (await identity.readAsString()).trim();
+    if (!RegExp(r'^[a-f0-9]{32}$').hasMatch(id)) {
+      throw const FormatException('设备标识无效');
+    }
+    return id;
+  }
+
+  Future<bool> get transactionPending =>
+      _file(root, 'transaction.json').exists();
 
   Directory get _staging => Directory('${root.path}.new');
   Directory get _retired => Directory('${root.path}.old');
@@ -72,6 +89,31 @@ class LocalFiles {
   }
 
   Future<void> write(String name, Object? value) => _write(root, name, value);
+
+  /// The journal is the commit point. Recovery is idempotent; no .bak journal
+  /// is read, since that could replay an already completed older transaction.
+  Future<void> recoverTransaction() async {
+    final journal = _file(root, 'transaction.json');
+    if (!await journal.exists()) return;
+    final entries = Map<String, Object?>.from(
+      jsonDecode(await journal.readAsString()) as Map,
+    );
+    for (final entry in entries.entries) {
+      final resolved = path.normalize(path.join(root.path, entry.key));
+      if (!path.isWithin(root.path, resolved) ||
+          entry.key == 'transaction.json') {
+        throw const FormatException('事务路径无效');
+      }
+      await _write(root, entry.key, entry.value);
+    }
+    await journal.delete();
+  }
+
+  Future<void> transaction(Map<String, Object?> entries) async {
+    await recoverTransaction();
+    await _write(root, 'transaction.json', entries);
+    await recoverTransaction();
+  }
 
   Future<void> replaceAll(Map<String, Object?> files) async {
     if (await _staging.exists()) await _staging.delete(recursive: true);

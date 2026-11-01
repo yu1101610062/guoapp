@@ -22,6 +22,7 @@ import 'diary_view.dart';
 import 'settings_rows.dart';
 import 'sources_view.dart';
 import 'storage_view.dart';
+import 'sync_settings.dart';
 
 enum SettingsGroup {
   appearance('外观', Icons.palette_outlined),
@@ -30,6 +31,7 @@ enum SettingsGroup {
   sources('站源', Icons.dns_outlined),
   proxy('代理', Icons.language_rounded),
   users('用户', Icons.manage_accounts_outlined),
+  sync('坚果云同步', Icons.cloud_sync_outlined),
   about('关于', Icons.info_outline_rounded),
   diagnostics('诊断', Icons.receipt_long_outlined);
 
@@ -91,6 +93,9 @@ class SettingsSection extends StatelessWidget {
               SettingsGroup.sources => _sources(context),
               SettingsGroup.proxy => _proxy(context),
               SettingsGroup.users => [UsersView(store: store, open: open)],
+              SettingsGroup.sync => [
+                SyncSettings(key: ValueKey(store.profileEpoch), store: store),
+              ],
               SettingsGroup.about => _about(context),
               SettingsGroup.diagnostics => _diagnostics(),
               _ => const [],
@@ -116,6 +121,20 @@ class SettingsSection extends StatelessWidget {
     return [
       SettingsCard(
         children: [
+          SwitchTile(
+            title: '自动连播',
+            subtitle: '播完一集后播放下一集，下次打开视频时生效',
+            value: preferences.autoAdvance,
+            onChanged: (value) =>
+                savePreferences(preferences.copyWith(autoAdvance: value)),
+          ),
+          SwitchTile(
+            title: '弹幕',
+            subtitle: '支持弹幕的站源默认显示弹幕，下次打开视频时生效',
+            value: preferences.danmaku,
+            onChanged: (value) =>
+                savePreferences(preferences.copyWith(danmaku: value)),
+          ),
           ValueTile<double>(
             title: '默认倍速',
             subtitle: '与播放器内设置同步',

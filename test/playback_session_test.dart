@@ -4,6 +4,7 @@ import 'package:duanju_app/core_bridge.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/models.dart';
 import 'package:duanju_app/playback_session.dart';
+import 'package:duanju_app/playback_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 
@@ -131,7 +132,50 @@ void main() {
     expect(watch.episode, 2);
     expect(watch.position, 40);
     expect(watch.duration, 100);
+    expect(watch.episodeId, session.episode.id);
+    expect(watch.sessionId, isNotEmpty);
   });
+
+  test(
+    'remote preferences wait for the next playback and a speed edit preserves remote quality',
+    () async {
+      final store = await openStore(), remote = await openStore();
+      final repository = _PlaybackRepository();
+      final (session, player) = await _open(repository, store);
+      await remote.setPlaybackPreferences(
+        const PlaybackPreferences(speed: 1.5, quality: 720, danmaku: false),
+      );
+      await store.mergeSync([
+        remote.syncState.categoryJson('preferences'),
+      ], epoch: store.profileEpoch);
+      expect(session.speed, 1);
+      expect(session.danmakuEnabled, isTrue);
+      expect(player.rates.last, 1);
+      await session.setSpeed(2);
+      expect(store.playbackPreferences.quality, 720);
+      expect(store.playbackPreferences.danmaku, isFalse);
+      final (next, _) = await _open(repository, store);
+      expect(next.speed, 2);
+      expect(next.danmakuEnabled, isFalse);
+      expect(repository.resolved.last.quality, 720);
+    },
+  );
+  test(
+    'auto-advance preference is honored on a new playback session',
+    () async {
+      final store = await openStore();
+      await store.setPlaybackPreferences(
+        const PlaybackPreferences(autoAdvance: false),
+      );
+      final (session, player) = await _open(_PlaybackRepository(), store);
+      player.progress(_seconds(99.5), duration: _seconds(100));
+      player.finish();
+      await pumpEventQueue();
+      expect(session.index, 0);
+      expect(player.opened, hasLength(1));
+      expect(store.watched(_show.id), isNotNull);
+    },
+  );
 
   test('a finished episode moves on to the next one', () async {
     final repository = _PlaybackRepository();

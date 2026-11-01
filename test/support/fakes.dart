@@ -8,6 +8,7 @@ import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/models.dart';
 import 'package:duanju_app/ranking_models.dart';
 import 'package:duanju_app/resource_settings.dart';
+import 'package:duanju_app/sync/sync_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -65,6 +66,20 @@ LocalFiles temporaryFiles() {
 class MemoryFiles extends LocalFiles {
   MemoryFiles() : super(Directory('memory'));
   final contents = <String, String>{};
+  final _identity = newSyncId();
+  @override
+  Future<String> installationId() async => _identity;
+  @override
+  Future<bool> get transactionPending async => false;
+  @override
+  Future<void> recoverTransaction() async {}
+  @override
+  Future<void> transaction(Map<String, Object?> entries) async {
+    final encoded = {
+      for (final e in entries.entries) e.key: jsonEncode(e.value),
+    };
+    contents.addAll(encoded);
+  }
 
   @override
   Future<bool> exists() async => contents.containsKey(LocalFiles.marker);
@@ -134,7 +149,11 @@ DramaDetail dramaDetail(
   String warning = '',
 }) => DramaDetail(drama, [
   for (var number = 1; number <= count; number++)
-    Episode({'currentEpisode': number, 'vip': vip.contains(number)}, number),
+    Episode({
+      'id': '${drama.id}:$number',
+      'currentEpisode': number,
+      'vip': vip.contains(number),
+    }, number),
 ], warning: warning);
 
 Future<LocalStore> restartStore(LocalStore store) async {

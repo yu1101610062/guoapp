@@ -84,15 +84,29 @@ class _HistoryPageState extends State<HistoryPage> {
     _selection = selection;
   });
 
-  Future<void> _remove(Set<String> ids, {required bool clear}) async {
-    if (ids.isEmpty) return;
+  Future<void> _remove(
+    Set<String> ids, {
+    required bool clear,
+    bool all = false,
+  }) async {
+    if (ids.isEmpty && !all) return;
     final colors = Theme.of(context).colorScheme;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text(clear ? '清空观看记录？' : '删除 ${ids.length} 条观看记录？'),
+        title: Text(
+          all
+              ? '清空全部观看记录？'
+              : clear
+              ? '清空观看记录？'
+              : '删除 ${ids.length} 条观看记录？',
+        ),
         content: Text(
-          clear ? '将删除当前列出的 ${ids.length} 条观看记录，追剧不受影响。' : '追剧不受影响。',
+          all
+              ? '将清空当前用户全部站源的观看记录，包括未显示的旧记录，并同步到其他设备。追剧不受影响。'
+              : clear
+              ? '将删除当前列出的 ${ids.length} 条观看记录，追剧不受影响。'
+              : '追剧不受影响。',
         ),
         actions: [
           FocusRing(
@@ -118,7 +132,10 @@ class _HistoryPageState extends State<HistoryPage> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    await saveSetting(context, () => widget.store.removeHistory(ids));
+    await saveSetting(
+      context,
+      () => all ? widget.store.clearHistory() : widget.store.removeHistory(ids),
+    );
     if (!mounted) return;
     setState(() => _selection = null);
     _keepFocus(_firstPoster, _searchField);
@@ -206,8 +223,12 @@ class _HistoryPageState extends State<HistoryPage> {
       focusNode: _editButton,
     ),
     _textButton(
-      '清空',
-      view.shown.isEmpty ? null : () => _remove(_ids(view), clear: true),
+      view.source.isEmpty && _query.text.trim().isEmpty ? '清空全部' : '清空当前',
+      view.source.isEmpty && _query.text.trim().isEmpty
+          ? () => _remove(_ids(view), clear: true, all: true)
+          : view.shown.isEmpty
+          ? null
+          : () => _remove(_ids(view), clear: true),
       icon: icons ? Icons.delete_outline_rounded : null,
     ),
   ];

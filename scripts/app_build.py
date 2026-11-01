@@ -5,6 +5,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class BuildVariant:
     all_sources: bool = False
+    sync_test: bool = False
 
     @property
     def slug(self):
@@ -12,11 +13,12 @@ class BuildVariant:
 
     @property
     def arguments(self):
-        return ['--all-sources'] if self.all_sources else []
+        return (['--all-sources'] if self.all_sources else []) + (['--sync-test'] if self.sync_test else [])
 
     @property
     def flutter_arguments(self):
-        return ['--dart-define=ALL_SOURCES=' + str(self.all_sources).lower()]
+        return ['--dart-define=ALL_SOURCES=' + str(self.all_sources).lower(),
+                '--dart-define=SYNC_TEST_BUILD=' + str(self.sync_test).lower()]
 
     @property
     def linker_flags(self):
@@ -28,5 +30,7 @@ class BuildVariant:
 
 
 def add_variant_argument(parser):
+    parser.add_argument('--sync-test', action='store_true',
+                        help='使用独立的同步测试数据目录与 Android 应用 ID，不覆盖正式应用')
     parser.add_argument('--all-sources', action='store_true',
                         help='构建包含全部站源的真果鉴；默认构建仅红果的红果鉴')

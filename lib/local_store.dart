@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,6 +15,8 @@ import 'local_snapshot.dart';
 import 'models.dart';
 import 'playback_preferences.dart';
 import 'theme_color.dart';
+import 'sync/sync_state.dart';
+import 'sync/sync_merger.dart';
 
 const _usersFile = LocalFiles.marker;
 const _settingsFile = 'settings.json';
@@ -79,10 +82,19 @@ class LocalStore extends ChangeNotifier {
   int _epoch = 0;
   int _failures = 0;
   DateTime _retryAfter = DateTime(2000);
+  SyncState _syncState = SyncState();
+  String deviceId = '';
+  String _installationId = '';
+  SyncHooks? syncHooks;
+  bool _syncWriteFailed = false;
+  SyncState get syncState => _syncState.copy();
 
   Future<void> _initialize() async {
     try {
       if (!await files.exists()) await _migrate();
+      await files.recoverTransaction();
+      _installationId = await files.installationId();
+      _syncWriteFailed = false;
     } catch (_) {
       _block(_blocked);
       return;
@@ -203,6 +215,10 @@ class LocalStore extends ChangeNotifier {
       _map(await _readFile(name));
 
   Future<void> _loadUser() async {
+    deviceId = sha256
+        .convert(utf8.encode('$_installationId/$_current'))
+        .toString()
+        .substring(0, 32);
     _history.clear();
     _favorites.clear();
     _followStates.clear();
@@ -239,6 +255,278 @@ class LocalStore extends ChangeNotifier {
         _followChecks[entry.key] = FollowCheck.fromJson(entry.value);
       } catch (_) {}
     }
+    try {
+      final raw = await files.read(_userFile(id, 'sync'));
+      _syncState = raw == null || (raw is Map && raw['reseed'] == true)
+          ? _seedSync()
+          : SyncState.fromJson(raw);
+      if (raw is Map && raw['reseed'] == true) {
+        _syncState.binding = jsonMap(raw['binding']);
+        _syncState.sequence = raw['sequence'] as int? ?? 0;
+        _syncState.needsReview = true;
+        _syncState.automatic = false;
+      }
+    } catch (_) {
+      // A damaged journal must never silently turn into a fresh cloud writer.
+      await files.quarantine(_userFile(id, 'sync'));
+      _syncState = _seedSync()
+        ..needsReview = true
+        ..automatic = false;
+    }
+  }
+
+  SyncState _seedSync() {
+    final state = SyncState();
+    for (final drama in _favorites.values) {
+      final key = syncDramaKey(drama.toJson());
+      state.records['favorites']![key] = [
+        SyncRecord(
+          key: key,
+          version: SyncVersion(0, 0, deviceId),
+          time: 0,
+          data: drama.toJson(),
+        ),
+      ];
+    }
+    for (final watch in _history.values) {
+      final key = syncDramaKey(watch.drama.toJson());
+      final time = watch.updatedAt.millisecondsSinceEpoch;
+      state.records['history']![key] = [
+        SyncRecord(
+          key: key,
+          version: SyncVersion(time, 0, deviceId),
+          time: time,
+          data: watch.toJson(),
+          session: watch.sessionId ?? 'import',
+        ),
+      ];
+    }
+    final prefs = PlaybackPreferences.fromJson(
+      _map(_userSettings['playback']),
+    ).toJson();
+    for (final key in syncedPreferences) {
+      state.records['preferences']![key] = [
+        SyncRecord(
+          key: key,
+          version: SyncVersion(0, 0, deviceId),
+          time: 0,
+          data: {'value': prefs[key]},
+        ),
+      ];
+    }
+    for (final c in syncCategories) {
+      state.revision[c] = 1;
+    }
+    return state;
+  }
+
+  Future<void> _commitSync(
+    SyncState next,
+    Map<String, Object?> contents, {
+    bool progress = false,
+    bool remote = false,
+  }) async {
+    if (_syncWriteFailed) throw StateError('同步事务待恢复，请重新启动应用后重试');
+    try {
+      await files.transaction({
+        ...contents,
+        _userFile(_current, 'sync'): next.toJson(),
+      });
+    } catch (_) {
+      _syncWriteFailed = await files.transactionPending;
+      throw StateError('写入未完成，重新启动后将自动恢复事务');
+    }
+    _syncState = next;
+    if (!remote) syncHooks?.changed(progress: progress);
+  }
+
+  Future<void> updateSync(
+    void Function(SyncState) update, {
+    required int epoch,
+  }) => _queue(() async {
+    if (locked || epoch != _epoch) return;
+    final next = _syncState.copy();
+    update(next);
+    await _commitSync(next, {}, remote: true);
+    _notify();
+  });
+
+  /// Only this path applies remote data, with no mutation hooks and no new HLC.
+  Future<void> mergeSync(
+    List<Map<String, dynamic>> docs, {
+    required int epoch,
+    void Function(SyncState)? update,
+    SyncState? base,
+    String? expected,
+  }) => _queue(() async {
+    if (locked || epoch != _epoch) return;
+    if (expected != null && jsonEncode(_syncState.toJson()) != expected) {
+      throw StateError('本地记录已变更，请重新预览合并');
+    }
+    final next = SyncMerger.merge(base ?? _syncState, docs);
+    update?.call(next);
+    final favorites = <String, Drama>{};
+    for (final records in next.records['favorites']!.values) {
+      final record = records.firstOrNull;
+      if (record == null || record.deleted) continue;
+      var drama = Drama.fromJson(record.data!);
+      if (_favorites[drama.id] case final old?) drama = drama.merge(old);
+      favorites[drama.id] = drama;
+    }
+    final history = <WatchEntry>[];
+    for (final key in next.records['history']!.keys) {
+      final record = SyncMerger.positions(next, key).firstOrNull;
+      if (record != null) {
+        final watch = WatchEntry.fromJson(record.data!);
+        final old = _history[watch.drama.id]?.drama;
+        history.add(
+          WatchEntry(
+            drama: old == null ? watch.drama : watch.drama.merge(old),
+            episode: watch.episode,
+            episodeId: watch.episodeId,
+            sessionId: watch.sessionId,
+            position: watch.position,
+            duration: watch.duration,
+            updatedAt: watch.updatedAt,
+          ),
+        );
+      }
+    }
+    history.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final playback = {..._map(_userSettings['playback'])};
+    for (final entry in next.records['preferences']!.entries) {
+      if (entry.value.firstOrNull?.data case final data?) {
+        playback[entry.key] = data['value'];
+      }
+    }
+    PlaybackPreferences.fromJson(playback);
+    final settings = {..._userSettings, 'playback': playback};
+    final states = {
+      for (final d in favorites.values)
+        d.id: _followStates[d.id] ?? FollowState.initial(d),
+    };
+    await _commitSync(next, {
+      _userFile(_current, 'favorites'): favorites.values
+          .map((d) => d.toJson())
+          .toList(),
+      _userFile(_current, 'history'): history
+          .take(300)
+          .map((w) => w.toJson())
+          .toList(),
+      _userFile(_current, 'settings'): settings,
+      _userFile(_current, 'followStates'): {
+        for (final e in states.entries) e.key: e.value.toJson(),
+      },
+    }, remote: true);
+    _favorites
+      ..clear()
+      ..addAll(favorites);
+    _history
+      ..clear()
+      ..addEntries(history.take(300).map((w) => MapEntry(w.drama.id, w)));
+    _followStates
+      ..clear()
+      ..addAll(states);
+    _userSettings = settings;
+    _notify();
+  });
+
+  Future<String> saveSyncRecovery() => _queueValue(() async {
+    final name =
+        'recovery/${DateTime.now().millisecondsSinceEpoch}-${newSyncId()}.json';
+    await files.write(name, {
+      'profile': _current,
+      'favorites': _favorites.values.map((d) => d.toJson()).toList(),
+      'history': _history.values.map((w) => w.toJson()).toList(),
+      'playback': playbackPreferences.toJson(),
+      'sync': _syncState.toJson(),
+    });
+    return '${files.root.path}/$name';
+  });
+
+  Future<List<String>> syncRecoveries() async {
+    final dump = await files.dump();
+    final names = <String>[];
+    for (final entry in dump.entries) {
+      if (!RegExp(
+        r'^recovery/[0-9]+-[a-f0-9]{32}\.json$',
+      ).hasMatch(entry.key)) {
+        continue;
+      }
+      try {
+        if ((jsonDecode(entry.value) as Map)['profile'] == _current) {
+          names.add(entry.key);
+        }
+      } catch (_) {}
+    }
+    return names..sort((a, b) => b.compareTo(a));
+  }
+
+  Future<void> restoreSyncRecovery(String name) {
+    final epoch = _epoch;
+    return _queue(() async {
+      if (locked ||
+          epoch != _epoch ||
+          !RegExp(r'^recovery/[0-9]+-[a-f0-9]{32}\.json$').hasMatch(name)) {
+        throw StateError('无法恢复当前用户的副本');
+      }
+      final data = jsonMap(await files.read(name));
+      if (data['profile'] != _current) throw StateError('恢复副本属于其他用户');
+      final next = SyncState.fromJson(data['sync']);
+      for (final c in syncCategories) {
+        SyncMerger.validateCategory(next.categoryJson(c));
+      }
+      final favorites = {
+        for (final d in _rows(data['favorites']).map(Drama.fromJson)) d.id: d,
+      };
+      final history = {
+        for (final w in _rows(data['history']).map(WatchEntry.fromJson))
+          w.drama.id: w,
+      };
+      final settings = {
+        ..._userSettings,
+        'playback': PlaybackPreferences.fromJson(
+          jsonMap(data['playback']),
+        ).toJson(),
+      };
+      final states = {
+        for (final d in favorites.values) d.id: FollowState.initial(d),
+      };
+      next.binding = _syncState.binding;
+      next.sequence = _syncState.sequence;
+      next.needsReview = true;
+      next.automatic = false;
+      await _commitSync(next, {
+        _userFile(_current, 'favorites'): favorites.values
+            .map((d) => d.toJson())
+            .toList(),
+        _userFile(_current, 'history'): history.values
+            .map((w) => w.toJson())
+            .toList(),
+        _userFile(_current, 'settings'): settings,
+        _userFile(_current, 'followStates'): {
+          for (final e in states.entries) e.key: e.value.toJson(),
+        },
+      }, remote: true);
+      _favorites
+        ..clear()
+        ..addAll(favorites);
+      _history
+        ..clear()
+        ..addAll(history);
+      _followStates
+        ..clear()
+        ..addAll(states);
+      _userSettings = settings;
+      _epoch++;
+      _notify();
+    });
+  }
+
+  Future<T> _queueValue<T>(Future<T> Function() action) {
+    final future = _writes.catchError((Object _) {}).then((_) => action());
+    _writes = future.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return future;
   }
 
   static List<LocalProfile> _readProfiles(dynamic records) {
@@ -462,7 +750,19 @@ class LocalStore extends ChangeNotifier {
     return _queue(() async {
       if (locked || epoch != _epoch) throw StateError('当前用户已变更，请重试');
       final settings = {..._userSettings, key: value};
-      await _write(_userFile(_current, 'settings'), settings);
+      if (key == 'playback') {
+        final next = _syncState.copy();
+        final old = playbackPreferences.toJson();
+        final updated = value as Map;
+        for (final field in syncedPreferences) {
+          if (old[field] != updated[field]) {
+            next.put('preferences', field, {'value': updated[field]}, deviceId);
+          }
+        }
+        await _commitSync(next, {_userFile(_current, 'settings'): settings});
+      } else {
+        await _write(_userFile(_current, 'settings'), settings);
+      }
       _userSettings = settings;
       _notify();
     });
@@ -592,8 +892,27 @@ class LocalStore extends ChangeNotifier {
         entries[drama.id] = drama;
         states[drama.id] = FollowState.initial(drama);
       }
-      await _saveStates(states);
-      await _saveFavorites(entries);
+      final next = _syncState.copy()
+        ..put(
+          'favorites',
+          syncDramaKey(drama.toJson()),
+          entries.containsKey(drama.id) ? drama.toJson() : null,
+          deviceId,
+        );
+      await _commitSync(next, {
+        _userFile(_current, 'favorites'): entries.values
+            .map((d) => d.toJson())
+            .toList(),
+        _userFile(_current, 'followStates'): {
+          for (final e in states.entries) e.key: e.value.toJson(),
+        },
+      });
+      _favorites
+        ..clear()
+        ..addAll(entries);
+      _followStates
+        ..clear()
+        ..addAll(states);
       _notify();
     });
   }
@@ -608,12 +927,33 @@ class LocalStore extends ChangeNotifier {
             id,
       };
       if (removed.isEmpty) return;
-      await _saveStates(
-        Map.of(_followStates)..removeWhere((id, _) => removed.contains(id)),
-      );
-      await _saveFavorites(
-        Map.of(_favorites)..removeWhere((id, _) => removed.contains(id)),
-      );
+      final next = _syncState.copy();
+      for (final id in removed) {
+        next.put(
+          'favorites',
+          syncDramaKey(_favorites[id]!.toJson()),
+          null,
+          deviceId,
+        );
+      }
+      final favorites = Map.of(_favorites)
+        ..removeWhere((id, _) => removed.contains(id));
+      final states = Map.of(_followStates)
+        ..removeWhere((id, _) => removed.contains(id));
+      await _commitSync(next, {
+        _userFile(_current, 'favorites'): favorites.values
+            .map((d) => d.toJson())
+            .toList(),
+        _userFile(_current, 'followStates'): {
+          for (final e in states.entries) e.key: e.value.toJson(),
+        },
+      });
+      _favorites
+        ..clear()
+        ..addAll(favorites);
+      _followStates
+        ..clear()
+        ..addAll(states);
       _notify();
     });
   }
@@ -655,13 +995,33 @@ class LocalStore extends ChangeNotifier {
               position: entry.position,
               duration: entry.duration,
               updatedAt: entry.updatedAt,
+              episodeId: entry.episodeId,
+              sessionId: entry.sessionId,
             );
       final sorted = [
         for (final other in _history.values)
           if (other.drama.id != id) other,
         current,
       ]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-      await _saveHistory(sorted.take(300));
+      var next = _syncState.copy()
+        ..put(
+          'history',
+          syncDramaKey(current.drama.toJson()),
+          current.toJson(),
+          deviceId,
+          session: current.sessionId ?? 'local',
+          time: current.updatedAt.millisecondsSinceEpoch,
+        );
+      next = SyncMerger.merge(next, []);
+      await _commitSync(next, {
+        _userFile(_current, 'history'): sorted
+            .take(300)
+            .map((w) => w.toJson())
+            .toList(),
+      }, progress: true);
+      _history
+        ..clear()
+        ..addEntries(sorted.take(300).map((w) => MapEntry(w.drama.id, w)));
       if (_followStates[id] case final following?) {
         final state = following.observe(current.drama);
         if (jsonEncode(state) != jsonEncode(following)) {
@@ -681,7 +1041,13 @@ class LocalStore extends ChangeNotifier {
     final epoch = _epoch;
     return _queue(() async {
       if (locked || epoch != _epoch) return;
-      await _saveHistory(const []);
+      final next = _syncState.copy();
+      next.clearHistory = next.tick(deviceId);
+      next.revision['history'] = next.revision['history']! + 1;
+      await _commitSync(SyncMerger.merge(next, []), {
+        _userFile(_current, 'history'): [],
+      });
+      _history.clear();
       _notify();
     });
   }
@@ -697,9 +1063,24 @@ class LocalStore extends ChangeNotifier {
             id,
       };
       if (removed.isEmpty) return;
-      await _saveHistory(
-        _history.values.where((entry) => !removed.contains(entry.drama.id)),
-      );
+      final next = _syncState.copy();
+      for (final id in removed) {
+        next.put(
+          'history',
+          syncDramaKey(_history[id]!.drama.toJson()),
+          null,
+          deviceId,
+        );
+      }
+      final history = _history.values
+          .where((entry) => !removed.contains(entry.drama.id))
+          .toList();
+      await _commitSync(SyncMerger.merge(next, []), {
+        _userFile(_current, 'history'): history.map((w) => w.toJson()).toList(),
+      });
+      _history
+        ..clear()
+        ..addEntries(history.map((w) => MapEntry(w.drama.id, w)));
       _notify();
     });
   }
@@ -734,6 +1115,8 @@ class LocalStore extends ChangeNotifier {
               position: watched.position,
               duration: watched.duration,
               updatedAt: watched.updatedAt,
+              episodeId: watched.episodeId,
+              sessionId: watched.sessionId,
             );
             historyChanged = true;
           }
@@ -1047,6 +1430,14 @@ class LocalStore extends ChangeNotifier {
     };
     for (final profile in profiles) {
       final library = libraries[profile.id] as Map;
+      final oldSync = await files.read(_userFile(profile.id, 'sync'));
+      if (oldSync is Map && oldSync['binding'] != null) {
+        contents[_userFile(profile.id, 'sync')] = {
+          'reseed': true,
+          'binding': oldSync['binding'],
+          'sequence': oldSync['sequence'],
+        };
+      }
       contents.addAll({
         _userFile(profile.id, 'history'): library['history'],
         _userFile(profile.id, 'favorites'): library['favorites'],

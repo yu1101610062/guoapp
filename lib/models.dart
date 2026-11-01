@@ -330,12 +330,16 @@ class WatchEntry {
     required this.position,
     required this.duration,
     required this.updatedAt,
+    this.episodeId,
+    this.sessionId,
   });
   final Drama drama;
   final int episode;
   final double position;
   final double duration;
   final DateTime updatedAt;
+  final String? episodeId;
+  final String? sessionId;
   bool get finished => duration > 1 && position >= duration - 1;
   Map<String, dynamic> toJson() => {
     'drama': drama.toJson(),
@@ -343,6 +347,8 @@ class WatchEntry {
     'position': position,
     'duration': duration,
     'updatedAt': updatedAt.toIso8601String(),
+    if (episodeId != null) 'episodeId': episodeId,
+    if (sessionId != null) 'sessionId': sessionId,
   };
   factory WatchEntry.fromJson(Map<String, dynamic> json) => WatchEntry(
     drama: Drama.fromJson(Map<String, dynamic>.from(json['drama'] as Map)),
@@ -351,6 +357,8 @@ class WatchEntry {
     duration: (json['duration'] as num?)?.toDouble() ?? 0,
     updatedAt:
         DateTime.tryParse(json['updatedAt'].toString()) ?? DateTime(2000),
+    episodeId: json['episodeId'] as String?,
+    sessionId: json['sessionId'] as String?,
   );
 }
 

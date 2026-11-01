@@ -192,9 +192,30 @@ class FollowCheck {
 
 int resumeEpisodeIndex(List<Episode> episodes, WatchEntry? watch) {
   if (episodes.isEmpty || watch == null) return 0;
-  final current = episodes.indexWhere((item) => item.number == watch.episode);
-  if (current >= 0 && !watch.finished) return current;
-  final next = episodes.indexWhere((item) => item.number > watch.episode);
+  final current = matchWatchEpisode(episodes, watch);
+  if (current == null) return 0; // UI asks for a selection before starting.
+  if (!watch.finished) return current;
+  final nextNumber = episodes[current].number + 1;
+  final next = episodes.indexWhere((item) => item.number == nextNumber);
   if (next >= 0) return next;
-  return current >= 0 ? current : episodes.length - 1;
+  return current;
+}
+
+int? matchWatchEpisode(List<Episode> episodes, WatchEntry watch) {
+  final id = watch.episodeId;
+  if (id != null && id.isNotEmpty) {
+    final matches = [
+      for (var i = 0; i < episodes.length; i++)
+        if (episodes[i].id == id) i,
+    ];
+    if (matches.length == 1) return matches.single;
+    if (matches.length > 1) return null;
+  }
+  final matches = [
+    for (var i = 0; i < episodes.length; i++)
+      if (intValue(episodes[i].raw['currentEpisode']) == watch.episode &&
+          watch.episode > 0)
+        i,
+  ];
+  return matches.length == 1 ? matches.single : null;
 }

@@ -6,6 +6,10 @@ import 'package:flutter/services.dart';
 import '../../drama_details.dart';
 import '../../local_store.dart';
 import '../../models.dart';
+import '../../follow_state.dart';
+import '../../sync/sync_merger.dart';
+import '../../sync/sync_state.dart';
+import '../../sync/sync_controller.dart';
 import '../app_scope.dart';
 import '../downloads/download_picker_page.dart';
 import '../player/playback_handle.dart';
@@ -248,8 +252,9 @@ class _DetailPageState extends State<DetailPage> {
   double _startAt(int index, {required bool resume}) {
     final watch = _details!.watch;
     return resume &&
-            watch?.episode == _details!.episodes[index].number &&
-            !watch!.finished
+            watch != null &&
+            matchWatchEpisode(_details!.episodes, watch) == index &&
+            !watch.finished
         ? watch.position
         : 0.0;
   }
@@ -298,6 +303,65 @@ class _DetailPageState extends State<DetailPage> {
 
   Future<void> _play(int index, {bool resume = false}) async {
     final details = _details!;
+    final epoch = widget.store.profileEpoch;
+    WatchEntry? chosen;
+    if (resume) {
+      await widget.store.syncHooks?.beforeResume();
+      if (!mounted || epoch != widget.store.profileEpoch || !details.allowed) {
+        return;
+      }
+      final hook = widget.store.syncHooks;
+      if (hook is SyncController && hook.resumePending) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('云端进度待同步，暂使用本地观看位置')));
+      }
+      final candidates = SyncMerger.positions(
+        widget.store.syncState,
+        syncDramaKey(details.drama.toJson()),
+      );
+      if (candidates.length > 1 &&
+          (candidates.any(
+                (r) =>
+                    r.uncertain ||
+                    (r.time - r.version.wall).abs() > 300000 ||
+                    r.time > DateTime.now().millisecondsSinceEpoch + 300000,
+              ) ||
+              (candidates[0].version.wall - candidates[1].version.wall).abs() <
+                  300000)) {
+        final pick = await showDialog<int>(
+          context: context,
+          builder: (context) => SimpleDialog(
+            title: const Text('选择续播位置'),
+            children: [
+              for (var i = 0; i < candidates.length; i++)
+                SimpleDialogOption(
+                  onPressed: () => Navigator.pop(context, i),
+                  child: Text(
+                    '${widget.store.syncState.devices[candidates[i].version.device] ?? '设备 ${candidates[i].version.device.substring(0, math.min(8, candidates[i].version.device.length))}'} · '
+                    '第 ${candidates[i].data!['episode']} 集 · ${(candidates[i].data!['position'] as num).toInt()} 秒',
+                  ),
+                ),
+            ],
+          ),
+        );
+        if (!mounted || pick == null || epoch != widget.store.profileEpoch) {
+          return;
+        }
+        chosen = WatchEntry.fromJson(candidates[pick].data!);
+      }
+      final watch = chosen ?? details.watch;
+      if (watch != null) {
+        final match = matchWatchEpisode(details.episodes, watch);
+        if (match == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('原分集缺失或集号不明确，请手动选集；观看记录已保留')),
+          );
+          return;
+        }
+        index = resumeEpisodeIndex(details.episodes, watch);
+      }
+    }
     final episode = details.episodes[index];
     if (episode.vip &&
         details.drama.source != SourceSite.dsd.id &&
@@ -321,8 +385,19 @@ class _DetailPageState extends State<DetailPage> {
             true) {
       return;
     }
-    if (!mounted || !details.allowed) return;
-    final position = _startAt(index, resume: resume);
+    if (!mounted || !details.allowed || epoch != widget.store.profileEpoch) {
+      return;
+    }
+    final position = chosen == null
+        ? _startAt(index, resume: resume)
+        : !chosen.finished &&
+              matchWatchEpisode(details.episodes, chosen) == index
+        ? chosen.position
+        : 0.0;
+    if (widget.store.syncState.binding != null) {
+      _handle?.dispose();
+      _handle = null;
+    }
     final handle = _handle ?? _open(index, position: position);
     _handle = null;
     handle.session.start(index, position: position);

@@ -613,7 +613,11 @@ class NativeRepository extends AppRepository {
 
   @override
   Future<void> initialize() async {
-    final directory = await getApplicationSupportDirectory();
+    final support = await getApplicationSupportDirectory();
+    final directory = const bool.fromEnvironment('SYNC_TEST_BUILD')
+        ? Directory(path.join(support.path, 'sync-test-v1'))
+        : support;
+    await directory.create(recursive: true);
     if (!background) {
       DiaryService.nativeLogPath = path.join(directory.path, 'logs', 'app.log');
     }

@@ -109,6 +109,7 @@ class _SettingsPageState extends State<SettingsPage> {
       SettingsGroup.sources => allSourcesEnabled ? '站源管理、目录请求间隔' : '目录请求间隔',
       SettingsGroup.proxy => '连接方式、代理地址',
       SettingsGroup.users => '当前：${store.profile.name}',
+      SettingsGroup.sync => '追剧、观看进度与播放偏好',
       SettingsGroup.about =>
         scope.version.isEmpty ? '版本未知' : '版本 ${scope.version}',
       SettingsGroup.diagnostics => '播放调试日记、备份与恢复',
