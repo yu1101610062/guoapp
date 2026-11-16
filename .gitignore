@@ -40,5 +40,10 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+.claude/settings.local.json
 
-/CLAUDE.md
+/guoapp-sources/
+
+/native/core/bundled/*
+!/native/core/bundled/.gitkeep
+/bundled-modules/

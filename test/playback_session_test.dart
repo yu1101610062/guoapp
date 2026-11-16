@@ -101,13 +101,56 @@ void _close(PlaybackSession session) {
 Duration _seconds(num value) => Duration(milliseconds: (value * 1000).round());
 
 Future<void> _settle(FakePlayer player) async {
-  player.state = player.state.copyWith(buffer: _seconds(25));
-  player.progress(_seconds(5), duration: _seconds(100));
+  player.state = player.state.copyWith(buffer: _seconds(80));
+  player.progress(_seconds(60), duration: _seconds(100));
   await Future<void>.delayed(const Duration(milliseconds: 700));
   await pumpEventQueue();
 }
 
 void main() {
+  test(
+    'local display edits preserve remote preferences during playback',
+    () async {
+      final store = await openStore(), remote = await openStore();
+      final (session, _) = await _open(_PlaybackRepository(), store);
+      await remote.setPlaybackPreferences(
+        const PlaybackPreferences(
+          speed: 1.5,
+          quality: 720,
+          danmaku: false,
+          autoAdvance: false,
+        ),
+      );
+      await store.mergeSync([
+        remote.syncState.categoryJson('preferences'),
+      ], epoch: store.profileEpoch);
+      final version = store.syncState.categoryJson('preferences');
+      final pending = store.syncState.pending;
+      await session.setVideoFit(VideoFit.crop);
+      await session.setDanmakuScale(1.2);
+      await session.setDanmakuWords(['剧透']);
+      expect(store.playbackPreferences.videoFit, VideoFit.crop);
+      expect(store.playbackPreferences.speed, 1.5);
+      expect(store.playbackPreferences.quality, 720);
+      expect(store.playbackPreferences.danmaku, isFalse);
+      expect(store.playbackPreferences.autoAdvance, isFalse);
+      expect(store.syncState.categoryJson('preferences'), version);
+      expect(store.syncState.pending, pending);
+      expect(session.speed, 1);
+      expect(session.danmakuEnabled, isTrue);
+    },
+  );
+
+  test('blocked words saved elsewhere reach the playing session', () async {
+    final store = await openStore();
+    final (session, _) = await _open(_PlaybackRepository(), store);
+
+    await store.setPlaybackPreferences(
+      store.playbackPreferences.copyWith(danmakuWords: const ['剧透']),
+    );
+    expect(session.danmaku.blockedWords, ['剧透']);
+  });
+
   test('opens the episode at the resume position and saves progress', () async {
     final repository = _PlaybackRepository();
     final store = await openStore();
@@ -463,23 +506,44 @@ void main() {
     session.endBoost();
     await pumpEventQueue();
     expect(player.rates.last, 1);
-  });
 
-  test('the next episode opens early and keeps loading while paused', () async {
-    final repository = _PlaybackRepository();
-    final store = await openStore();
-    final standby = FakePlayer();
-    final (session, player) = await _open(repository, store, standby: standby);
-
-    session.togglePlayback();
-    player.state = player.state.copyWith(buffer: _seconds(4));
-    player.progress(_seconds(.5), duration: _seconds(100));
-    await Future<void>.delayed(const Duration(milliseconds: 700));
+    await store.setPlaybackPreferences(
+      store.playbackPreferences.copyWith(boostSpeed: 3),
+    );
+    session.holdBoost();
     await pumpEventQueue();
-
-    expect(player.state.playing, isFalse);
-    expect(session.standbyIndex, 1);
+    expect(player.rates.last, 3);
   });
+
+  test(
+    'the next episode opens near the end and keeps loading while paused',
+    () async {
+      final repository = _PlaybackRepository();
+      final store = await openStore();
+      final standby = FakePlayer();
+      final (session, player) = await _open(
+        repository,
+        store,
+        standby: standby,
+      );
+
+      session.togglePlayback();
+      player.state = player.state.copyWith(buffer: _seconds(24));
+      player.progress(_seconds(20), duration: _seconds(100));
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      await pumpEventQueue();
+      expect(repository.preloaded, isEmpty);
+      expect(session.standbyIndex, -1);
+
+      player.state = player.state.copyWith(buffer: _seconds(64));
+      player.progress(_seconds(60), duration: _seconds(100));
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+      await pumpEventQueue();
+
+      expect(player.state.playing, isFalse);
+      expect(session.standbyIndex, 1);
+    },
+  );
 
   test('a paused preopen does not open the next episode', () async {
     final repository = _PlaybackRepository();

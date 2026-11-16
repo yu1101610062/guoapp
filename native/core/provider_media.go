@@ -1,16 +1,19 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
 
-type providerMedia struct {
-	credentials *providerMediaCredentials
+type ProviderMedia struct {
+	Credentials *MediaCredentials
 	URL         string
 	Referer     string
 	Duration    time.Duration
@@ -18,77 +21,37 @@ type providerMedia struct {
 	HLSKey      []byte
 	CENCKey     []byte
 	Quality     int
-	Variants    []providerMedia
+	Variants    []ProviderMedia
 }
 
 func (d *Downloader) providerBaseURL(source string) string {
 	source = canonicalProviderSource(source)
-	var configured, fallback string
-	switch source {
-	case sourceHuangguoAI:
-		configured, fallback = d.cfg.HuangguoAIURL, huangguoAIBaseURL
-	case sourceHuangguoVideo:
-		configured, fallback = d.cfg.HuangguoVideoURL, huangguoVideoBaseURL
-	case sourceHuangdou:
-		configured, fallback = d.cfg.HuangdouURL, huangdouBaseURL
-	case sourceHongguo:
-		configured, fallback = d.cfg.HongguoURL, hongguoBaseURL
-	case sourceHuangju:
-		configured, fallback = d.cfg.HuangjuURL, huangjuBaseURL
-	case sourceYeguo:
-		configured, fallback = d.cfg.YeguoURL, yeguoBaseURL
-	case sourceDSD:
-		configured, fallback = d.cfg.DSDURL, dsdBaseURL
-	case sourceSorani:
-		configured, fallback = d.cfg.SoraniURL, soraniSiteBaseURL
-	case sourceGuipian:
-		configured, fallback = d.cfg.GuipianURL, guipianSiteBaseURL
-	case sourceHanxiaoquan:
-		configured, fallback = d.cfg.HanxiaoquanURL, hanxiaoquanSiteBaseURL
-	default:
-		fallback = "https://d2pypzndaqisk.cloudfront.net"
+	if descriptor, ok := registeredDescriptor(source); ok {
+		if p, ok := d.provider(source); ok {
+			if sited, ok := providerAs[Sited](p); ok {
+				return strings.TrimRight(sited.BaseURL(), "/")
+			}
+		}
+		return strings.TrimRight(descriptor.BaseURL, "/")
 	}
-	return strings.TrimRight(firstNonEmpty(configured, fallback), "/")
+	return "https://d2pypzndaqisk.cloudfront.net"
 }
 
-func providerSourceForURL(raw string) string {
+func ProviderSourceForURL(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return ""
 	}
 	host := strings.ToLower(parsed.Hostname())
-	switch {
-	case host == "huangguoai.com" || strings.HasSuffix(host, ".ediayikma.cc") || strings.HasSuffix(host, ".agdkczeyx.cc"):
-		return sourceHuangguoAI
-	case host == "huangguo.video":
-		return sourceHuangguoVideo
-	case host == "tideember.cc" || host == "xqjurgek.top":
-		return sourceHuangdou
-	case host == "hongguoduanju.com" || host == "www.hongguoduanju.com":
-		return sourceHongguo
-	case host == "huangju.net" || host == "www.huangju.net" || host == "api.huangju.net":
-		return sourceHuangju
-	case host == "ygdj7.com" || host == "www.ygdj7.com" || host == "ygdj15.com" || host == "www.ygdj15.com" ||
-		host == "analyze.buxefaex.cc" || strings.HasSuffix(host, ".buxefaex.cc") ||
-		strings.HasSuffix(host, ".fzchosdi.cc") || strings.HasSuffix(host, ".lwblvxvy.cc") ||
-		host == "delta.ygrwdsgt.cc" || host == "yeguodj.com" || host == "www.yeguodj.com":
-		return sourceYeguo
-	case host == "dsd.com.se" || host == "www.dsd.com.se":
-		return sourceDSD
-	case host == "sorani.net" || host == "www.sorani.net" || host == "api.sorani.cc" || host == "sorani.cc":
-		return sourceSorani
-	case host == "guipianwu.com" || host == "www.guipianwu.com":
-		return sourceGuipian
-	case host == "jennyhow.com" || host == "www.jennyhow.com":
-		return sourceHanxiaoquan
-	default:
-		return ""
+	if id, ok := registeredSource(host); ok {
+		return id
 	}
+	return ""
 }
 
-func (d *Downloader) providerURLCandidates(raw string) []string {
-	source := providerSourceForURL(raw)
-	if source == "" || source == sourceHuangju || source == sourceYeguo {
+func (d *Downloader) providerURLCandidates(ctx context.Context, raw string) []string {
+	source := ProviderSourceForURL(raw)
+	if descriptor, registered := registeredDescriptor(source); source == "" || registered && descriptor.NoHostRotation {
 		return []string{raw}
 	}
 	parsed, _ := url.Parse(raw)
@@ -103,118 +66,228 @@ func (d *Downloader) providerURLCandidates(raw string) []string {
 			candidates = append(candidates, candidate)
 		}
 	}
-	add(rehostProviderURL(parsed, preferred))
+	add(RehostProviderURL(parsed, preferred))
 	configured := d.providerBaseURL(source)
-	add(rehostProviderURL(parsed, configured))
-	if providerSourceForURL(configured) == "" {
+	add(RehostProviderURL(parsed, configured))
+	if ProviderSourceForURL(configured) == "" {
 		return candidates
 	}
-	for _, candidate := range providerURLCandidates(raw) {
+	rotated := []string{raw}
+	if mirrors, ok := ctx.Value(providerTextMirrorsKey{}).([]string); ok {
+		rotated = mirrors
+	} else if p, ok := d.provider(source); ok {
+		if rotator, ok := providerAs[URLRotator](p); ok {
+			rotated = rotator.URLCandidates(raw)
+		}
+	}
+	for _, candidate := range rotated {
 		add(candidate)
 	}
 	return candidates
 }
 
-func (d *Downloader) resolveProviderMedia(ctx context.Context, task Task) (providerMedia, error) {
+func (d *Downloader) resolveProviderMedia(ctx context.Context, task Task) (ProviderMedia, error) {
 	chapter := task.Chapter
 	chapter.Source = canonicalProviderSource(chapter.Source)
 	if chapter.Source == "" {
-		chapter.Source = sourceFromDramaID(task.DramaID)
+		chapter.Source = SourceFromDramaID(task.DramaID)
 	}
-	if chapter.Source == sourceCloudFront {
-		return d.resolveLegacyMedia(ctx, task)
+	p, ok := d.provider(chapter.Source)
+	if !ok {
+		return ProviderMedia{}, fmt.Errorf("unsupported provider source: %s", chapter.Source)
 	}
-	if chapter.Source == sourceHuangju {
-		return d.resolveHuangjuMedia(ctx, task)
-	}
-	if chapter.Source == sourceYeguo {
-		return d.resolveYeguoMedia(ctx, task)
-	}
-	if chapter.Source == sourceDSD {
-		return d.resolveDSDMedia(ctx, task)
-	}
-	if chapter.Source == sourceSorani {
-		return d.resolveSoraniMedia(ctx, task)
-	}
-	if chapter.Source == sourceGuipian {
-		return d.resolveGuipianMedia(ctx, task)
-	}
-	if chapter.Source == sourceHanxiaoquan {
-		return d.resolveHanxiaoquanMedia(ctx, task)
-	}
-	if strings.HasPrefix(chapter.VideoURL, "hongguo-cenc://") {
-		return d.resolveHongguoMedia(ctx, task)
-	}
-	if chapter.PageURL == "" && (chapter.Source == sourceHuangguoAI || chapter.Source == sourceHuangguoVideo) {
-		if source, sourceID, valid := splitProviderDramaID(task.DramaID); valid {
-			_, chapters, err := d.GetHuangguoChapters(ctx, source, sourceID)
-			if err != nil {
-				return providerMedia{}, fmt.Errorf("刷新旧任务播放地址失败: %w", err)
-			}
-			matched := false
-			for _, fresh := range chapters {
-				if fresh.ID == chapter.ID {
-					chapter = fresh
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return providerMedia{}, fmt.Errorf("原章节已变化，请更新该合集后重新下载")
-			}
-		}
-	}
-	media := providerMedia{URL: chapter.VideoURL, Referer: firstNonEmpty(chapter.Referer, d.providerBaseURL(chapter.Source)+"/")}
-	if chapter.Source == sourceHuangdou {
-		_, sourceID, valid := splitProviderDramaID(task.DramaID)
-		if valid {
-			sequence, err := strconv.Atoi(chapter.EpisodeString(task.Index))
-			if err != nil || sequence < 1 {
-				return providerMedia{}, fmt.Errorf("黄豆集数无效")
-			}
-			client := newHuangdouAPIClient(d)
-			media, err = d.resolveHuangdouPlayback(ctx, client, sourceID, sequence)
-			if err != nil {
-				return providerMedia{}, err
-			}
-			media.Referer = client.host + "/home"
-		}
-	}
-	if chapter.PageURL != "" && (chapter.Source == sourceHuangguoAI || chapter.Source == sourceHuangguoVideo) {
-		responses := &playbackResponseURLs{}
-		pageContext := context.WithValue(ctx, playbackResponseURLsKey{}, responses)
-		body, err := d.fetchProviderText(pageContext, chapter.PageURL, media.Referer)
-		if err != nil {
-			return providerMedia{}, err
-		}
-		pageURL := chapter.PageURL
-		if actual, ok := responses.values.Load(chapter.PageURL); ok {
-			pageURL = actual.(string)
-		}
-		if chapter.Source == sourceHuangguoAI {
-			media.URL = parseAIVideoURL(body, pageURL)
-		} else {
-			media.URL = parseDataHLS(body, pageURL)
-		}
-		media.Referer = pageURL
-	}
-	if !isProviderHTTPMediaURL(media.URL) {
-		return providerMedia{}, fmt.Errorf("%s 未返回有效播放地址，请刷新章节或确认站点访问权限", chapter.Source)
+	return p.ResolveMedia(ctx, task)
+}
+
+func (d *Downloader) finishProviderMedia(ctx context.Context, media ProviderMedia, source string) (ProviderMedia, error) {
+	if !IsProviderHTTPMediaURL(media.URL) {
+		return ProviderMedia{}, fmt.Errorf("%s 未返回有效播放地址，请刷新章节或确认站点访问权限", source)
 	}
 	parsed, _ := url.Parse(media.URL)
 	if strings.HasSuffix(strings.ToLower(parsed.Path), ".m3u8") {
 		playlist, finalURL, err := d.fetchMediaPlaylist(ctx, media.URL, media.Referer)
 		if err != nil {
-			return providerMedia{}, fmt.Errorf("获取播放列表失败: %w", err)
+			return ProviderMedia{}, fmt.Errorf("获取播放列表失败: %w", err)
 		}
 		if !strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(playlist, "\ufeff")), "#EXTM3U") {
-			return providerMedia{}, fmt.Errorf("站点未返回有效 M3U8，可能需要登录或链接已失效")
+			return ProviderMedia{}, fmt.Errorf("站点未返回有效 M3U8，可能需要登录或链接已失效")
 		}
-		if duration := m3u8Duration(playlist); duration > 0 {
+		if duration := M3u8Duration(playlist); duration > 0 {
 			media.Duration = duration
 		}
 		media.Playlist = playlist
 		media.URL = finalURL
 	}
 	return media, nil
+}
+
+func (d *Downloader) fetchProviderRequest(ctx context.Context, rawURL, referer string, payload []byte) (string, error) {
+	retries := d.cfg.Retries
+	if retries <= 0 {
+		retries = 3
+	}
+	if referer == "" {
+		referer = rawURL
+	}
+	candidates := d.providerURLCandidates(ctx, rawURL)
+	var lastErr error
+	tried := 0
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		attempts := retries
+		if len(candidates) > 1 {
+			attempts = 1
+		}
+		for attempt := 1; attempt <= attempts; attempt++ {
+			tried++
+			if attempt > 1 {
+				select {
+				case <-time.After(time.Duration(attempt) * time.Second):
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+			}
+			timeout := ProviderTimeout
+			if len(candidates) > 1 {
+				timeout = 5 * time.Second
+			}
+			method, requestBody := http.MethodGet, io.Reader(nil)
+			if payload != nil {
+				method, requestBody = http.MethodPost, bytes.NewReader(payload)
+			}
+			req, err := http.NewRequestWithContext(ctx, method, candidate, requestBody)
+			if err != nil {
+				return "", err
+			}
+			if payload != nil {
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Accept", "application/json")
+			}
+			req.Header.Set("User-Agent", UserAgent)
+			if agent, ok := ctx.Value(providerTextUserAgentKey{}).(string); ok && agent != "" {
+				req.Header.Set("User-Agent", agent)
+			}
+			if ProviderSourceForURL(rawURL) != "" {
+				req.Header.Set("Referer", providerRefererForURL(candidate, referer))
+			} else {
+				req.Header.Set("Referer", referer)
+			}
+			req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+			if cookie, ok := ctx.Value(providerTextCookieKey{}).(string); ok && cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
+			if noCache, _ := ctx.Value(providerTextNoCacheKey{}).(bool); noCache {
+				req.Header.Set("Cache-Control", "no-cache")
+			}
+			resp, err := d.doCatalogRequestWithTimeout(req, timeout)
+			if err != nil {
+				lastErr = err
+				var backoff *RequestBackoff
+				if errors.As(err, &backoff) {
+					break
+				}
+				continue
+			}
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, ProviderMaxBodyBytes+1))
+			closeErr := resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
+			if closeErr != nil {
+				lastErr = closeErr
+				continue
+			}
+			if len(body) > ProviderMaxBodyBytes {
+				lastErr = fmt.Errorf("response exceeds %d bytes", ProviderMaxBodyBytes)
+				continue
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 || catalogResponseBlockReason(resp, body) != "" {
+				lastErr = d.catalogResponseError(req, resp, body)
+				if catalogResponseBlockReason(resp, body) != "" || resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 408 {
+					break
+				}
+				continue
+			}
+			if source := ProviderSourceForURL(rawURL); source != "" {
+				effectiveURL := req.URL
+				if resp.Request != nil {
+					effectiveURL = resp.Request.URL
+				}
+				d.providerMu.Lock()
+				d.providerHosts[source] = effectiveURL.Scheme + "://" + effectiveURL.Host
+				d.providerMu.Unlock()
+			}
+			rememberPlaybackResponseURL(ctx, rawURL, resp)
+			return string(body), nil
+		}
+	}
+	if len(candidates) > 1 && lastErr != nil {
+		name := "站源"
+		if descriptor, ok := registeredDescriptor(ProviderSourceForURL(rawURL)); ok && descriptor.Name != "" {
+			name = descriptor.Name
+		}
+		return "", fmt.Errorf("%s请求失败：已尝试 %d 个域名，最后错误：%w", name, tried, lastErr)
+	}
+	return "", lastErr
+}
+
+func RehostProviderURL(u *url.URL, mirror string) string {
+	mu, err := url.Parse(mirror)
+	if err != nil || mu.Host == "" {
+		return ""
+	}
+	copyURL := *u
+	copyURL.Scheme = mu.Scheme
+	copyURL.Host = mu.Host
+	return copyURL.String()
+}
+
+func providerRefererForURL(candidate, fallback string) string {
+	target, err := url.Parse(candidate)
+	previous, previousErr := url.Parse(fallback)
+	if err != nil || target.Host == "" || previousErr != nil || previous.Host == "" {
+		return fallback
+	}
+	if source := ProviderSourceForURL(fallback); source != "" && (source == ProviderSourceForURL(candidate) || ProviderSourceForURL(candidate) == "") {
+		previous.Scheme, previous.Host = target.Scheme, target.Host
+	}
+	previous.Fragment = ""
+	return previous.String()
+}
+
+func (d *Downloader) GetHuangguoChapters(ctx context.Context, source, sourceID string) (string, []Chapter, error) {
+	p, ok := d.provider(source)
+	if !ok {
+		return "", nil, fmt.Errorf("unsupported provider source: %s", source)
+	}
+	drama, chapters, err := p.Detail(ctx, sourceID)
+	return drama.DisplayTitle(), chapters, err
+}
+
+func (d *Downloader) repairCover(drama LibraryDrama) string {
+	if d == nil {
+		return drama.Cover
+	}
+	for _, source := range []string{drama.Source, SourceFromDramaID(drama.ID)} {
+		if p, ok := d.provider(source); ok {
+			if repairer, ok := providerAs[CoverRepairer](p); ok {
+				return repairer.RepairCover(drama)
+			}
+		}
+	}
+	return drama.Cover
+}
+
+func (d *Downloader) mediaAuthorizer(address *url.URL) MediaAuthorizer {
+	for _, descriptor := range registeredDescriptors() {
+		if p, ok := d.provider(descriptor.ID); ok {
+			if authorizer, ok := providerAs[MediaAuthorizer](p); ok && authorizer.AuthorizesMedia(address) {
+				return authorizer
+			}
+		}
+	}
+	return nil
 }

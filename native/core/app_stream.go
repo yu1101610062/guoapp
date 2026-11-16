@@ -8,12 +8,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +32,7 @@ type nativeStreamAsset struct {
 }
 
 type nativeStreamSession struct {
-	credentials  *providerMediaCredentials
+	credentials  *MediaCredentials
 	mu           sync.Mutex
 	assets       map[string]nativeStreamAsset
 	referer      string
@@ -39,6 +41,9 @@ type nativeStreamSession struct {
 	cancel       context.CancelFunc
 	lastUsed     time.Time
 	diagnosticID string
+	cencKey      []byte
+	cencMu       sync.Mutex
+	cenc         *cencLayout
 }
 
 type nativeStreamServer struct {
@@ -47,6 +52,48 @@ type nativeStreamServer struct {
 	address    string
 	sessions   map[string]*nativeStreamSession
 	server     *http.Server
+	lan        *http.Server
+	lanPort    int
+}
+
+func (stream *nativeStreamServer) lanOrigin(device string) (string, error) {
+	if _, _, err := net.SplitHostPort(device); err != nil {
+		device = net.JoinHostPort(device, "80")
+	}
+	probe, err := net.Dial("udp4", device)
+	if err != nil {
+		return "", fmt.Errorf("无法确定本机在局域网中的地址：%w", err)
+	}
+	host := probe.LocalAddr().(*net.UDPAddr).IP.String()
+	_ = probe.Close()
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.lan == nil {
+		listener, err := net.Listen("tcp4", ":0")
+		if err != nil {
+			return "", fmt.Errorf("无法开启局域网投屏服务：%w", err)
+		}
+		stream.lan = &http.Server{Handler: stream.server.Handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
+		stream.lanPort = listener.Addr().(*net.TCPAddr).Port
+		go func(server *http.Server) { _ = server.Serve(listener) }(stream.lan)
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(stream.lanPort)), nil
+}
+
+func (stream *nativeStreamServer) lanClose() {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.lan != nil {
+		_ = stream.lan.Close()
+		stream.lan = nil
+	}
+}
+
+func (stream *nativeStreamServer) lanPlaylist(request *http.Request, body string) string {
+	if origin := "http://" + request.Host; origin != stream.address {
+		return strings.ReplaceAll(body, stream.address+"/", origin+"/")
+	}
+	return body
 }
 
 func (stream *nativeStreamServer) nativeRequest(request *http.Request) (*http.Response, error) {
@@ -83,14 +130,14 @@ func newNativeStreamServer(d *Downloader) (*nativeStreamServer, error) {
 	return stream, nil
 }
 
-func (stream *nativeStreamServer) nativeOpen(media providerMedia) (string, string) {
+func (stream *nativeStreamServer) nativeOpen(media ProviderMedia) (string, string) {
 	tokenBytes := make([]byte, 24)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		panic(err)
 	}
 	token := hex.EncodeToString(tokenBytes)
-	ctx, cancel := context.WithCancel(providerMediaContext(context.Background(), media.credentials))
-	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, referer: media.Referer, key: media.HLSKey, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials, diagnosticID: nativeStreamID(token)}
+	ctx, cancel := context.WithCancel(providerMediaContext(context.Background(), media.Credentials))
+	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, referer: media.Referer, key: media.HLSKey, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.Credentials, diagnosticID: nativeStreamID(token)}
 	stream.mu.Lock()
 	for id, old := range stream.sessions {
 		if time.Since(old.lastUsed) > 10*time.Minute {
@@ -186,7 +233,7 @@ func (stream *nativeStreamServer) nativeRewrite(token string, session *nativeStr
 				return ""
 			}
 			address := parsed.ResolveReference(relative).String()
-			if !isProviderHTTPMediaURL(address) {
+			if !IsProviderHTTPMediaURL(address) {
 				return ""
 			}
 			kind := "segment"
@@ -298,7 +345,7 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 			}
 			writer.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			if request.Method == http.MethodGet {
-				_, _ = io.WriteString(writer, body)
+				_, _ = io.WriteString(writer, stream.lanPlaylist(request, body))
 			}
 		} else {
 			writer.Header().Set("Content-Type", asset.contentType)
@@ -309,12 +356,16 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 		}
 		return
 	}
+	if len(session.cencKey) > 0 && asset.kind == "media" {
+		stream.nativeServeDecrypted(ctx, writer, request, session, asset)
+		return
+	}
 	upstream, err := http.NewRequestWithContext(ctx, request.Method, asset.address, nil)
 	if err != nil {
 		http.Error(writer, "媒体地址无效", http.StatusBadGateway)
 		return
 	}
-	upstream.Header.Set("User-Agent", userAgent)
+	upstream.Header.Set("User-Agent", UserAgent)
 	upstream.Header.Set("Referer", session.referer)
 	for _, name := range []string{"Range", "If-Range"} {
 		if value := request.Header.Get(name); value != "" {
@@ -376,7 +427,7 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 			return
 		}
 		writer.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		_, _ = io.WriteString(writer, rewritten)
+		_, _ = io.WriteString(writer, stream.lanPlaylist(request, rewritten))
 		return
 	}
 	for _, name := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {

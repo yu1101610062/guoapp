@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:duanju_app/local_files.dart';
+import 'package:duanju_app/models.dart';
 import 'package:duanju_app/sync/sync_state.dart';
 import 'package:duanju_app/sync/sync_merger.dart';
 import 'support/fakes.dart';
@@ -19,6 +20,34 @@ class InterruptedFiles extends LocalFiles {
 }
 
 void main() {
+  test(
+    'missing modules retain synced records across restart and reinstall',
+    () async {
+      final sites = List<SourceSite>.of(SourceSite.allValues);
+      addTearDown(() => SourceSite.install(sites));
+      final remote = await openStore(), local = await openStore();
+      final show = drama('42', source: 'guipian');
+      await remote.toggleFavorite(show);
+      await remote.saveWatch(watching(show, episode: 3, position: 24));
+      SourceSite.install(sites.where((site) => site.id != 'guipian'));
+      final pending = local.syncState.pending;
+      await local.mergeSync([
+        remote.syncState.categoryJson('favorites'),
+        remote.syncState.categoryJson('history'),
+      ], epoch: local.profileEpoch);
+      expect(local.favorites, isEmpty);
+      expect(local.history, isEmpty);
+      expect(local.syncState.pending, pending);
+      final restarted = await restartStore(local);
+      expect(restarted.favorites, isEmpty);
+      SourceSite.install(sites);
+      expect(restarted.favorites.single.id, show.id);
+      expect(restarted.watched(show.id)!.episode, 3);
+      expect(restarted.watched(show.id)!.position, 24);
+      expect(restarted.syncState.pending, pending);
+    },
+  );
+
   test(
     'journal replay commits local data and pending operation together after interruption',
     () async {

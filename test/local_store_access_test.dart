@@ -1,12 +1,12 @@
 import 'dart:convert';
 
-import 'package:duanju_app/app_build.dart';
 import 'package:duanju_app/local_profiles.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fakes.dart';
+import 'support/source_fixture.dart';
 
 Map<String, Object> _viewer(List<String> sources) => {
   'profiles': jsonEncode([
@@ -128,18 +128,12 @@ void main() {
   });
 
   group('sources', () {
-    test('restricted sources start switched off', () async {
+    test('available sources start switched on', () async {
       final store = await openStore();
       expect(
         store.sources.map((site) => site.id),
-        allSourcesEnabled
-            ? ['hongguo', 'hanxiaoquan', 'guipian', 'sorani']
-            : ['hongguo'],
+        SourceSite.values.map((site) => site.id),
       );
-      for (final site in SourceSite.restrictedValues) {
-        expect(store.sourceEnabled(site.id), isFalse, reason: site.id);
-        expect(store.allowsSource(site.id), isFalse, reason: site.id);
-      }
     });
 
     test('switches persist and follow the build edition', () async {
@@ -177,9 +171,7 @@ void main() {
     }
   });
 
-  test('build edition names match the source list', () {
-    expect(appSlug, allSourcesEnabled ? 'zhenguojian' : 'hongguojian');
-    expect(appName, allSourcesEnabled ? '真果鉴' : '红果鉴');
+  test('installed sources match the source list', () {
     expect(
       SourceSite.values.map((site) => site.id),
       allSourcesEnabled

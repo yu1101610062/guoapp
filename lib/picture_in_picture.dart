@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'app_device.dart';
+import 'window_on_top.dart';
 
 typedef MiniWindowFrame = ({double left, double top, double extent});
 
@@ -44,7 +45,6 @@ class PictureInPicture extends ChangeNotifier {
   bool _pending = false;
   bool _leaving = false;
   bool _window = false;
-  bool _autoEnter = false;
   double? _windowRatio;
   Timer? _timer;
   Map<String, Object>? _sent;
@@ -60,10 +60,7 @@ class PictureInPicture extends ChangeNotifier {
   bool get leaving => _leaving;
   bool get window => _window;
 
-  bool keepsPlaying(AppLifecycleState? state) =>
-      _active ||
-      state == AppLifecycleState.inactive &&
-          (_pending || _leaving || _autoEnter);
+  bool get active => _active;
 
   Future<void> _status() async {
     try {
@@ -120,7 +117,6 @@ class PictureInPicture extends ChangeNotifier {
     required bool autoEnter,
   }) {
     if (defaultTargetPlatform != TargetPlatform.android || !_supported) return;
-    _autoEnter = autoEnter;
     final next = <String, Object>{
       ..._ratio(aspectRatio),
       'playing': playing,
@@ -138,7 +134,6 @@ class PictureInPicture extends ChangeNotifier {
   }
 
   void clear() {
-    _autoEnter = false;
     if (_sent == null) return;
     _sent = null;
     unawaited(
@@ -283,6 +278,7 @@ class PictureInPicture extends ChangeNotifier {
         frame = await _exitMac();
       }
     } catch (_) {}
+    await applyWindowOnTop();
     await WidgetsBinding.instance.endOfFrame;
     _window = false;
     _windowRatio = null;

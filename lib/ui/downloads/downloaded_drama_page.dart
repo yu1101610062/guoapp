@@ -10,29 +10,34 @@ import '../../core_bridge.dart';
 import '../../download_collections.dart';
 import '../../download_export.dart';
 import '../../download_merge.dart';
+import '../../merge_queue.dart';
 import '../../download_overview.dart';
 import '../../local_store.dart';
 import '../../models.dart';
 import '../app_scope.dart';
+import '../detail/detail_page.dart';
 import '../player/playback_handle.dart';
 import '../player/playback_page.dart';
+import '../shell/app_shell.dart';
 import '../theme/motion.dart';
 import '../widgets/cover_image.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/motion/motion_widgets.dart';
 import '../widgets/status_view.dart';
 import 'download_actions.dart';
-import 'merge_dialog.dart';
+import 'merge_actions.dart';
 
 class DownloadedDramaPage extends StatefulWidget {
   const DownloadedDramaPage({
     super.key,
     required this.store,
     required this.downloads,
+    required this.merges,
     required this.drama,
   });
   final LocalStore store;
   final DownloadOverview downloads;
+  final MergeQueue merges;
   final Drama drama;
 
   @override
@@ -101,11 +106,17 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
 
   Future<void> _merge(DownloadedDrama item, Set<String> ids) async {
     setState(() => _busy = true);
-    await mergeDownloads(context, [
-      for (final job in item.episodes)
-        if (ids.contains(job.id)) job,
+    final queued = await enqueueMerges(context, widget.merges, [
+      [
+        for (final job in item.episodes)
+          if (ids.contains(job.id)) job,
+      ],
     ]);
-    if (mounted) setState(() => _busy = false);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      if (queued) _selection = null;
+    });
   }
 
   Future<void> _export(DownloadedDrama item, Set<String> ids) async {
@@ -251,6 +262,11 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
     icon: icon ? Icons.refresh_rounded : null,
   );
 
+  void _openDetail(Drama drama) => openPage<void>(
+    context,
+    (_) => DetailPage(store: widget.store, drama: drama),
+  );
+
   Widget _editButton(DownloadedDrama? item, {bool icon = true}) => _textButton(
     '编辑',
     item == null ? null : () => setState(() => _selection = {}),
@@ -318,7 +334,7 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
           ? AppBar(
               title: Text(drama.title),
               actions: [
-                _fillButton(drama, icon: false),
+                _textButton('详情', () => _openDetail(drama)),
                 _editButton(item, icon: false),
                 const SizedBox(width: 8),
               ],
@@ -330,7 +346,11 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
                 icon: const Icon(Icons.close_rounded),
               ),
               title: Text('已选择 ${selection.length} 集'),
-              actions: [_selectAll(item, selection), const SizedBox(width: 8)],
+              actions: [
+                _fillButton(drama, icon: false),
+                _selectAll(item, selection),
+                const SizedBox(width: 8),
+              ],
             ),
       body: SafeArea(
         top: false,
@@ -419,6 +439,7 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
                               mainAxisSize: MainAxisSize.min,
                               spacing: 8,
                               children: [
+                                _fillButton(drama),
                                 _selectAll(item, selection),
                                 _mergeButton(item, selection),
                                 if (Platform.isAndroid)
@@ -434,7 +455,14 @@ class _DownloadedDramaPageState extends State<DownloadedDramaPage> {
                               key: const ValueKey('normal'),
                               mainAxisSize: MainAxisSize.min,
                               spacing: 8,
-                              children: [_fillButton(drama), _editButton(item)],
+                              children: [
+                                _textButton(
+                                  '详情',
+                                  () => _openDetail(drama),
+                                  icon: Icons.info_outline_rounded,
+                                ),
+                                _editButton(item),
+                              ],
                             ),
                     ),
                   ],
@@ -776,6 +804,9 @@ class _EpisodeListState extends State<_EpisodeList> {
                   onTap: selecting
                       ? () => _toggle(index)
                       : () => widget.onPlay(index),
+                  onLongPress: selecting
+                      ? null
+                      : () => widget.onSelect({job.id}),
                 );
               },
             ),
@@ -903,11 +934,13 @@ class _EpisodeCard extends StatelessWidget {
     required this.watching,
     required this.selected,
     required this.onTap,
+    this.onLongPress,
   });
   final DownloadJob job;
   final bool watching;
   final bool? selected;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -936,6 +969,7 @@ class _EpisodeCard extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: onTap,
+            onLongPress: onLongPress,
             child: Padding(
               padding: EdgeInsets.fromLTRB(selected == null ? 16 : 8, 8, 12, 8),
               child: Row(

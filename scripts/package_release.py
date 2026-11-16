@@ -8,7 +8,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-from app_build import BuildVariant, add_variant_argument
+from app_build import app, add_variant_argument, configure_app
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -18,7 +18,7 @@ parser.add_argument('--identity', default='',
                     help='macOS 签名身份；默认 ad-hoc 签名（-），有 Developer ID 时传证书名')
 add_variant_argument(parser)
 options = parser.parse_args()
-variant = BuildVariant(options.all_sources, options.sync_test)
+configure_app(options)
 match = re.search(r'^version:\s*([\w.+-]+)\s*$', (root / 'pubspec.yaml').read_text(encoding='utf-8'), re.MULTILINE)
 if not match:
     raise SystemExit('pubspec.yaml 缺少合法版本号。')
@@ -63,7 +63,8 @@ def sign_macos_application(application, identity):
         flags += ['--options', 'runtime', '--timestamp']
     for framework in sorted((application / 'Contents' / 'Frameworks').glob('*')):
         run(flags + [framework])
-    run(flags + [application])
+    entitlements = root / 'macos' / 'Runner' / 'Release.entitlements'
+    run(flags + ['--entitlements', entitlements, application])
 
 
 def draw_dmg_background(path, display):
@@ -131,7 +132,7 @@ def build_macos_dmg(display, staging, staged, target):
 
 
 def package_macos(application):
-    display = '真果鉴' if variant.all_sources else '红果鉴'
+    display = app.display_name
     staging = root / 'build' / 'macos-dmg'
     if staging.exists():
         shutil.rmtree(staging)
@@ -142,11 +143,11 @@ def package_macos(application):
     info = plistlib.loads(plist_path.read_bytes())
     info['CFBundleDisplayName'] = display
     info['CFBundleName'] = display
-    info['CFBundleIdentifier'] = f'com.duanju.{variant.slug}'
+    info['CFBundleIdentifier'] = app.bundle_identifier
     plist_path.write_bytes(plistlib.dumps(info))
     sign_macos_application(staged, options.identity)
     verify_macos_application(staged)
-    target = output / f'{variant.slug}-{version}-macos-universal.dmg'
+    target = output / f'{app.slug}-{version}-macos-universal.dmg'
     if target.exists():
         target.unlink()
     build_macos_dmg(display, staging, staged, target)
@@ -167,6 +168,50 @@ def package_macos(application):
     return target
 
 
+def windows_product_name(path):
+    import ctypes
+    version = ctypes.windll.version
+    size = version.GetFileVersionInfoSizeW(str(path), None)
+    if not size:
+        return ''
+    data = ctypes.create_string_buffer(size)
+    version.GetFileVersionInfoW(str(path), 0, size, data)
+    value = ctypes.c_wchar_p()
+    length = ctypes.c_uint()
+    version.VerQueryValueW(data, r'\StringFileInfo\040904e4\ProductName', ctypes.byref(value), ctypes.byref(length))
+    return value.value or ''
+
+
+def find_inno_compiler():
+    candidates = [shutil.which('iscc')]
+    for variable, folder in (('LOCALAPPDATA', 'Programs'), ('ProgramFiles(x86)', ''), ('ProgramFiles', '')):
+        if os.environ.get(variable):
+            candidates.append(str(Path(os.environ[variable]) / folder / 'Inno Setup 6' / 'ISCC.exe'))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    raise SystemExit('找不到 Inno Setup 6 的 ISCC.exe，请先安装：winget install JRSoftware.InnoSetup')
+
+
+def package_windows_installer(bundle, bundle_executable):
+    base_name = f'{app.slug}-{version}-windows-x64-setup'
+    run([find_inno_compiler(), '/Q',
+         f'/DAppId={app.bundle_identifier}',
+         f'/DAppName={app.display_name}',
+         f'/DAppVersion={version}',
+         f'/DNumericVersion={version.replace("+", ".")}',
+         f'/DSlug={app.slug}',
+         f'/DBundleExecutable={bundle_executable}',
+         f'/DSourceDir={bundle}',
+         f'/DOutputDir={output}',
+         f'/DOutputBaseName={base_name}',
+         root / 'windows' / 'installer' / 'setup.iss'])
+    target = output / f'{base_name}.exe'
+    if not target.is_file():
+        raise SystemExit('Windows 安装包没有生成：' + str(target))
+    return target
+
+
 if options.platform == 'android':
     for abi in options.abi or ['arm64-v8a', 'armeabi-v7a', 'x86_64']:
         source = root / 'build' / 'app' / 'outputs' / 'flutter-apk' / f'app-{abi}-release.apk'
@@ -179,26 +224,32 @@ if options.platform == 'android':
             missing = set(required) - names
             if missing:
                 raise SystemExit('APK 缺少原生库：' + ', '.join(sorted(missing)))
-        target = output / f'{variant.slug}-{version}-{abi}.apk'
+        target = output / f'{app.slug}-{version}-{abi}.apk'
         shutil.copy2(source, target)
         artifacts.append(target)
 elif options.platform == 'windows':
     bundle = root / 'build' / 'windows' / 'x64' / 'runner' / 'Release'
-    required = ['zhenguojian.exe', 'duanju_core.dll', 'flutter_windows.dll', 'libffmpegkit.dll',
+    bundle_executable = 'guoapp.exe'
+    required = [bundle_executable, 'duanju_core.dll', 'flutter_windows.dll', 'libffmpegkit.dll',
                 'libmpv-2.dll', 'msvcp140.dll', 'vcruntime140.dll',
                 'data/icudtl.dat', 'data/app.so']
     missing = [name for name in required if not (bundle / name).is_file()]
     if missing:
         raise SystemExit('Windows 安装包缺少文件：' + ', '.join(missing))
-    target = output / f'{variant.slug}-{version}-windows-x64.zip'
+    built = windows_product_name(bundle / bundle_executable)
+    if built != app.display_name:
+        raise SystemExit(f'构建产物是 {built or "未知版本"}，与要打包的 {app.display_name} 不符，'
+                         '请先用 build_windows.py 以相同参数重新构建。')
+    target = output / f'{app.slug}-{version}-windows-x64.zip'
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
         for source in sorted(bundle.rglob('*')):
             if source.is_file():
                 relative = source.relative_to(bundle).as_posix()
-                if relative == 'zhenguojian.exe':
-                    relative = variant.slug + '.exe'
+                if relative == bundle_executable:
+                    relative = app.slug + '.exe'
                 archive.write(source, relative)
     artifacts.append(target)
+    artifacts.append(package_windows_installer(bundle, bundle_executable))
 else:
     application = root / 'build' / 'macos' / 'Build' / 'Products' / 'Release' / 'duanju_app.app'
     if not application.is_dir():

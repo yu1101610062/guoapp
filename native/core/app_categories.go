@@ -3,25 +3,12 @@ package core
 import (
 	"context"
 	"errors"
-	"fmt"
-	"html"
-	"net/url"
-	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 )
 
-type nativeCategory struct {
+type Category struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-}
-
-var nativeAICategories = []nativeCategory{
-	{ID: "ai-duanju", Name: "AI 短剧"},
-	{ID: "ai-manju", Name: "AI 漫剧"},
-	{ID: "ai-huanlian", Name: "AI 换脸"},
-	{ID: "ai-mogai", Name: "AI 魔改"},
 }
 
 func nativeCatalogKey(source, category string) string {
@@ -32,112 +19,37 @@ func nativeCatalogKey(source, category string) string {
 	return source
 }
 
-func validNativeCategory(source, category string) bool {
+func ValidNativeCategory(source, category string) bool {
 	if category == "" {
 		return true
 	}
 	if len(category) > 128 || strings.ContainsAny(category, "|/\\\x00\r\n") {
 		return false
 	}
-	switch source {
-	case sourceHongguo:
-		for _, genre := range hongguoAppGenres {
-			if category == genre.key {
-				return true
-			}
-		}
-		return hongguoTagPattern.MatchString(category)
-	case sourceHuangguoAI:
-		for _, entry := range nativeAICategories {
-			if category == entry.ID {
-				return true
-			}
-		}
-	case sourceHuangguoVideo:
-		id, err := strconv.Atoi(category)
-		return err == nil && id > 0
-	case sourceCloudFront:
-		return strings.TrimSpace(category) == category
-	case sourceHuangju:
-		return category == huangjuNewestCategory || validHuangjuID(category) && !strings.HasPrefix(category, "@")
-	case sourceYeguo:
-		return validYeguoCategory(category)
-	case sourceDSD:
-		return webProviderNumericID.MatchString(category)
-	case sourceSorani:
-		return validSoraniCategory(category)
-	case sourceGuipian:
-		return validGuipianCategory(category)
-	case sourceHanxiaoquan:
-		return validHanxiaoquanCategory(category)
+	if descriptor, ok := registeredDescriptor(source); ok {
+		return descriptor.ValidCategory != nil && descriptor.ValidCategory(category)
 	}
 	return false
 }
 
-func (engine *nativeEngine) nativeCategories(ctx context.Context, source string, force bool) ([]nativeCategory, error) {
+func (engine *nativeEngine) nativeCategories(ctx context.Context, source string, force bool) ([]Category, error) {
 	source = canonicalProviderSource(source)
-	all := []nativeCategory{{Name: "全部"}}
-	switch source {
-	case sourceHongguo:
-		for _, genre := range hongguoAppGenres {
-			all = append(all, nativeCategory{ID: genre.key, Name: genre.name})
-		}
-		return engine.hongguoCategories(ctx, all, force), nil
-	case sourceHuangguoAI:
-		return append(all, nativeAICategories...), nil
-	case sourceHuangdou:
-		return all, nil
-	}
+	all := []Category{{Name: "全部"}}
 	engine.mu.Lock()
-	cached := append([]nativeCategory{}, engine.categoryOptions[source]...)
+	cached := append([]Category{}, engine.categoryOptions[source]...)
 	engine.mu.Unlock()
 	if len(cached) > 1 && !force {
 		return cached, nil
 	}
 	d := engine.downloader
-	var err error
-	switch source {
-	case sourceCloudFront:
-		var tabs legacyTabList
-		err = d.fetchAPI(ctx, "/api/app/playlet-tab/all", nil, &tabs)
-		for _, tab := range tabs {
-			if validNativeCategory(source, tab.ID) && tab.ID != "" && tab.Name != "" {
-				all = append(all, nativeCategory{ID: tab.ID, Name: tab.Name})
-			}
-		}
-	case sourceHuangguoVideo:
-		address := d.providerBaseURL(source) + "/videos"
-		var body string
-		body, err = d.fetchProviderText(ctx, address, d.providerBaseURL(source)+"/")
-		if err == nil {
-			all = append(all, parseHuangguoVideoCategories(body)...)
-		}
-	case sourceHuangju:
-		var categories []nativeCategory
-		categories, err = d.fetchHuangjuCategories(ctx)
-		if err == nil {
-			all = append(all, categories...)
-		}
-	case sourceYeguo:
-		var categories []nativeCategory
-		categories, err = d.fetchYeguoCategories(ctx)
-		if err == nil {
-			all = append(all, categories...)
-		}
-	case sourceDSD:
-		var categories []nativeCategory
-		categories, err = d.fetchDSDCategories(ctx, force)
-		if err == nil {
-			all = append(all, categories...)
-		}
-	case sourceSorani:
-		all = append(all, d.fetchSoraniCategories()...)
-	case sourceGuipian:
-		all = append(all, d.fetchGuipianCategories()...)
-	case sourceHanxiaoquan:
-		all = append(all, d.fetchHanxiaoquanCategories()...)
-	default:
+	p, ok := d.provider(source)
+	if !ok {
 		return nil, errors.New("请选择有效站源")
+	}
+	categories, err := p.Categories(ctx, force)
+	all = append(all, categories...)
+	if errors.Is(err, ErrCategoriesIncomplete) {
+		return all, nil
 	}
 	if err != nil {
 		return nil, err
@@ -149,106 +61,12 @@ func (engine *nativeEngine) nativeCategories(ctx context.Context, source string,
 	return all, nil
 }
 
-func (engine *nativeEngine) hongguoCategories(ctx context.Context, genres []nativeCategory, force bool) []nativeCategory {
-	engine.mu.Lock()
-	cached := append([]nativeCategory{}, engine.categoryOptions[sourceHongguo]...)
-	engine.mu.Unlock()
-	if len(cached) > len(genres) && !force {
-		return cached
-	}
-	tags, err := engine.downloader.fetchHongguoTagCategories(ctx)
-	if err != nil {
-		if len(cached) > len(genres) {
-			return cached
-		}
-		return genres
-	}
-	all := append(genres, tags...)
-	engine.rememberCategories(sourceHongguo, all)
-	return all
-}
-
-func (engine *nativeEngine) rememberCategories(source string, all []nativeCategory) {
+func (engine *nativeEngine) rememberCategories(source string, all []Category) {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	if engine.categoryOptions == nil {
-		engine.categoryOptions = map[string][]nativeCategory{}
+		engine.categoryOptions = map[string][]Category{}
 	}
 	engine.categoryOptions[source] = all
 	engine.writeCatalogDiskLocked()
-}
-
-var categoryAnchorPattern = regexp.MustCompile(`(?is)<a\b([^>]*)>(.*?)</a>`)
-var categoryTextPattern = regexp.MustCompile(`(?s)<[^>]*>`)
-
-func parseHuangguoVideoCategories(body string) []nativeCategory {
-	var categories []nativeCategory
-	seen := map[string]bool{}
-	for _, match := range categoryAnchorPattern.FindAllStringSubmatch(body, -1) {
-		href := html.UnescapeString(extractAttr("<a "+match[1]+">", "href"))
-		address, err := url.Parse(href)
-		if err != nil || address.Path != "" && strings.TrimRight(address.Path, "/") != "/videos" {
-			continue
-		}
-		id := address.Query().Get("category")
-		name := strings.TrimSpace(html.UnescapeString(categoryTextPattern.ReplaceAllString(match[2], "")))
-		if !validNativeCategory(sourceHuangguoVideo, id) || id == "" || seen[id] || name == "" || len([]rune(name)) > 24 {
-			continue
-		}
-		seen[id] = true
-		categories = append(categories, nativeCategory{ID: id, Name: name})
-	}
-	return categories
-}
-
-func (d *Downloader) fetchHuangguoAICatalogPage(ctx context.Context, page int, category string) ([]Drama, bool, error) {
-	categories := nativeAICategories
-	if category != "" {
-		for _, entry := range categories {
-			if entry.ID == category {
-				categories = []nativeCategory{entry}
-				break
-			}
-		}
-	}
-	type categoryResult struct {
-		items []Drama
-		err   error
-	}
-	results := make([]categoryResult, len(categories))
-	slots := make(chan struct{}, 2)
-	var group sync.WaitGroup
-	for index, entry := range categories {
-		group.Add(1)
-		go func(index int, entry nativeCategory) {
-			defer group.Done()
-			select {
-			case slots <- struct{}{}:
-				defer func() { <-slots }()
-			case <-ctx.Done():
-				results[index].err = ctx.Err()
-				return
-			}
-			address := fmt.Sprintf("%s/api/videos/category/%s?sort=hot&page=%d&size=24", d.providerBaseURL(sourceHuangguoAI), url.PathEscape(entry.ID), page)
-			body, err := d.fetchProviderText(ctx, address, d.providerBaseURL(sourceHuangguoAI)+"/"+entry.ID+"/")
-			if err == nil {
-				results[index].items = parseHuangguoAIJSONCards([]byte(body), address, entry.Name)
-			}
-			if err != nil {
-				results[index].err = fmt.Errorf("%s: %w", entry.Name, err)
-			}
-		}(index, entry)
-	}
-	group.Wait()
-	var items []Drama
-	var failures []error
-	more := false
-	for _, result := range results {
-		items = append(items, result.items...)
-		more = more || len(result.items) >= 24 || result.err != nil
-		if result.err != nil {
-			failures = append(failures, result.err)
-		}
-	}
-	return items, more, errors.Join(failures...)
 }

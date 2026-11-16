@@ -13,6 +13,12 @@ env:
   GOPROXY: https://proxy.golang.org,direct
   GOSUMDB: sum.golang.org
   UPDATE_SERVER_URL: ${{ vars.UPDATE_SERVER_URL }}
+  PACKAGE_NAME: ${{ vars.PACKAGE_NAME }}
+  BUNDLED_MODULES: bundled-modules/hongguo
+  PYTHONUTF8: '1'
+  PROJECT_URL: ${{ vars.PROJECT_URL || format('https://github.com/{0}', github.repository) }}
+  TELEGRAM_GROUP_URL: ${{ vars.TELEGRAM_GROUP_URL }}
+  TELEGRAM_CHANNEL_URL: ${{ vars.TELEGRAM_CHANNEL_URL }}
 
 jobs:
   checks:
@@ -28,7 +34,7 @@ jobs:
       - &setup-flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.4'
+          flutter-version: '3.47.9'
           channel: stable
           cache: true
       - run: flutter pub get --enforce-lockfile
@@ -39,12 +45,7 @@ jobs:
       # 测试当前不阻塞出包（开发优先、集中验证暂缓），结果仍会显示在运行详情里。
       - run: flutter test --dart-define=DISABLE_REMOTE_IMAGES=true
         continue-on-error: true
-      - run: flutter test --dart-define=DISABLE_REMOTE_IMAGES=true --dart-define=ALL_SOURCES=true
-        continue-on-error: true
       - run: go test -race ./...
-        working-directory: native
-        continue-on-error: true
-      - run: go test -race -ldflags="-X duanjuapp/native/core.buildAllSources=true" ./...
         working-directory: native
         continue-on-error: true
 
@@ -82,16 +83,13 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy: &editions
-      fail-fast: false
-      matrix:
-        include:
-          - edition: hongguojian
-            arguments: ''
-          - edition: zhenguojian
-            arguments: '--all-sources'
     steps:
       - uses: actions/checkout@v4
+      - &checkout-hongguo
+        uses: actions/checkout@v4
+        with:
+          repository: guoapp-modules/hongguo
+          path: bundled-modules/hongguo
       - &setup-python
         uses: actions/setup-python@v5
         with:
@@ -110,7 +108,7 @@ jobs:
       - run: sdkmanager 'ndk;28.2.13676358'
       - name: Configure Android signing
         env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
           if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
@@ -119,20 +117,21 @@ jobs:
           fi
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
-      - run: python scripts/build_android.py ${{ matrix.arguments }}
+      - run: python scripts/build_android.py
         env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
       - name: 校验 APK 签名证书
         shell: bash
         env:
-          ANDROID_CERT_SHA256: ${{ vars.ANDROID_CERT_SHA256 }}
+          CERT_SHA256: ${{ vars.SIGNING_CERT_SHA256 }}
+          CERT_VARIABLE: SIGNING_CERT_SHA256
         run: |
           set -euo pipefail
-          expected=$(printf '%s' "$ANDROID_CERT_SHA256" | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+          expected=$(printf '%s' "$CERT_SHA256" | tr -d ': ' | tr '[:upper:]' '[:lower:]')
           if [ -z "$expected" ]; then
-            echo "未设置仓库变量 ANDROID_CERT_SHA256，无法确认发布证书。" >&2
+            echo "未设置仓库变量 $CERT_VARIABLE，无法确认发布证书。" >&2
             exit 1
           fi
           apksigner=$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f 2>/dev/null | sort | tail -n1 || true)
@@ -153,7 +152,7 @@ jobs:
           done
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.edition }}-android
+          name: android
           path: dist/android/*
           if-no-files-found: error
           retention-days: 14
@@ -162,9 +161,9 @@ jobs:
     needs: prepare
     runs-on: windows-latest
     timeout-minutes: 45
-    strategy: *editions
     steps:
       - uses: actions/checkout@v4
+      - *checkout-hongguo
       - *setup-go
       - *setup-python
       - *setup-flutter
@@ -179,10 +178,13 @@ jobs:
           if (-not $exe) { throw 'MinGW-w64 安装失败，找不到 gcc' }
           Split-Path $exe | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & $exe --version | Select-Object -First 1
-      - run: python scripts/build_windows.py ${{ matrix.arguments }}
+      - name: Set up Inno Setup
+        shell: pwsh
+        run: choco upgrade innosetup --no-progress -y
+      - run: python scripts/build_windows.py
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.edition }}-windows
+          name: windows
           path: dist/windows/*
           if-no-files-found: error
           retention-days: 14
@@ -191,9 +193,9 @@ jobs:
     needs: prepare
     runs-on: macos-latest
     timeout-minutes: 60
-    strategy: *editions
     steps:
       - uses: actions/checkout@v4
+      - *checkout-hongguo
       - *setup-python
       - *setup-go
       - *setup-flutter
@@ -213,10 +215,10 @@ jobs:
           flutter --version
           flutter precache --ios
       - name: Build unsigned iOS packages
-        run: python scripts/build_ios.py ${{ matrix.arguments }}
+        run: python scripts/build_ios.py
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.edition }}-ios-unsigned
+          name: ios-unsigned
           path: dist/ios/*
           if-no-files-found: error
           retention-days: 14
@@ -225,9 +227,9 @@ jobs:
     needs: prepare
     runs-on: macos-latest
     timeout-minutes: 60
-    strategy: *editions
     steps:
       - uses: actions/checkout@v4
+      - *checkout-hongguo
       - *setup-python
       - *setup-go
       - *setup-flutter
@@ -247,10 +249,10 @@ jobs:
           flutter --version
           flutter precache --macos
       - name: Build macOS packages
-        run: python scripts/build_macos.py ${{ matrix.arguments }}
+        run: python scripts/build_macos.py
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.edition }}-macos
+          name: macos
           path: dist/macos/*
           if-no-files-found: error
           retention-days: 14
@@ -272,14 +274,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
           TAG: ${{ needs.prepare.outputs.tag }}
-          ANDROID_CERT_SHA256: ${{ vars.ANDROID_CERT_SHA256 }}
+          SIGNING_CERT_SHA256: ${{ vars.SIGNING_CERT_SHA256 }}
         run: |
           set -euo pipefail
           cat > notes.md <<EOF
-          版本 ${VERSION}。两个版本功能相同，区别只在站源范围，按需选择：
-
-          - 红果鉴 hongguojian：仅红果站源
-          - 真果鉴 zhenguojian：全部站源
+          版本 ${VERSION}。安装包内置红果站源，其余站源在 我的 › 模块 的在线仓库安装。
 
           Android：
           - *-arm64-v8a.apk：适用于较新的安卓设备
@@ -290,12 +289,13 @@ jobs:
           - *-ios-unsigned.ipa：未签名 IPA，可用相关工具安装
 
           Windows：
-          - *-windows-x64.zip：解压后运行 hongguojian.exe 或 zhenguojian.exe
+          - *-windows-x64-setup.exe：安装包，默认安装到当前用户，无需管理员权限；安装时可改为所有用户
+          - *-windows-x64.zip：解压后运行 zhenguojian.exe，默认沿用系统用户目录中的真果鉴存档；仅在程序旁手动创建 userdata 目录后启用便携模式
 
           macOS：
-          - *-macos-universal.dmg：适用于 macOS 12 及以上的 Apple 芯片和 Intel 电脑，打开后拖入 Applications；未经公证，首次打开前在终端执行 xattr -dr com.apple.quarantine /Applications/红果鉴.app（真果鉴为 真果鉴.app）
+          - *-macos-universal.dmg：适用于 macOS 12 及以上的 Apple 芯片和 Intel 电脑，打开后拖入 Applications；未经公证，首次打开前在终端执行 xattr -dr com.apple.quarantine /Applications/真果鉴.app
 
-          签名证书 SHA-256：${ANDROID_CERT_SHA256}
+          Android 签名证书 SHA-256：${SIGNING_CERT_SHA256}
           EOF
           changes="$(awk -v heading="## ${VERSION}" '
             $0 == heading { found = 1; next }
@@ -308,7 +308,7 @@ jobs:
             { printf '更新内容：\n\n%s\n\n' "$changes"; cat notes.md; } > notes.tmp
             mv notes.tmp notes.md
           fi
-          gh release create "$TAG" release/* --target "$GITHUB_SHA" --title "红果鉴 / 真果鉴 ${VERSION}" --notes-file notes.md
+          gh release create "$TAG" release/* --target "$GITHUB_SHA" --title "真果鉴 ${VERSION}" --notes-file notes.md
       - name: 推送到 Telegram 频道
         continue-on-error: true
         env:
@@ -324,7 +324,7 @@ jobs:
           fi
           changes="$(cat changes.md)"
           url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
-          text="红果鉴 / 真果鉴 ${VERSION} 已发布"
+          text="真果鉴 ${VERSION} 已发布"
           if [ -n "$changes" ]; then
             text="$(printf '%s\n\n更新内容：\n\n%s' "$text" "${changes:0:3500}")"
           fi

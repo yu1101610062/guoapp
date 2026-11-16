@@ -140,6 +140,33 @@ void main() {
       (id: c.state.binding!['profileId'] as String, name: '测试资料');
   setUp(() => cloud = Cloud());
   test(
+    'erasing local data cancels sync without deleting cloud records',
+    () async {
+      final store = await openStore(), c = make(store);
+      await store.toggleFavorite(drama('saved'));
+      await bind(c);
+      final cloudFiles = jsonEncode(cloud.files);
+      final pending = Completer<void>();
+      cloud.hold = pending;
+      cloud.holdPath = 'ZhenguojianSync/v1/profiles/${profile(c).id}/heads';
+      final sync = c.synchronize(manual: true);
+      await pumpEventQueue();
+      expect(c.busy, isTrue);
+      await store.eraseAll(() async {
+        expect(store.locked, isTrue);
+        return [];
+      });
+      pending.complete();
+      await sync;
+      final requests = cloud.requests;
+      await c.synchronize(manual: true);
+      expect(cloud.requests, requests);
+      expect(jsonEncode(cloud.files), cloudFiles);
+      await expectLater(store.saveSyncRecovery(), throwsStateError);
+    },
+  );
+
+  test(
     'two clients sync both ways, offline deletes converge and remote merge produces no echo',
     () async {
       final sa = await openStore(), sb = await openStore();

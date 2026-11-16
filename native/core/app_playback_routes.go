@@ -10,21 +10,22 @@ import (
 )
 
 type nativePlaybackChoice struct {
+	danmakuSource string
 	danmakuSeries string
 	danmakuVideo  string
-	media         []providerMedia
+	media         []ProviderMedia
 	index         int
 	qualities     []int
 	streamSession string
 	created       time.Time
 }
 
-func nativePlaybackChoices(media providerMedia, quality int) nativePlaybackChoice {
+func nativePlaybackChoices(media ProviderMedia, quality int) nativePlaybackChoice {
 	choice := nativePlaybackChoice{qualities: []int{}}
 	seen := map[string]bool{}
 	qualities := map[int]bool{}
-	for _, option := range append([]providerMedia{media}, media.Variants...) {
-		if !isProviderHTTPMediaURL(option.URL) {
+	for _, option := range append([]ProviderMedia{media}, media.Variants...) {
+		if !IsProviderHTTPMediaURL(option.URL) {
 			continue
 		}
 		identity := option.URL + "\x00" + option.Referer + "\x00" + hex.EncodeToString(option.CENCKey) + "\x00" + hex.EncodeToString(option.HLSKey)
@@ -44,7 +45,7 @@ func nativePlaybackChoices(media providerMedia, quality int) nativePlaybackChoic
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(choice.qualities)))
 	if quality > 0 && qualities[quality] {
-		filtered := make([]providerMedia, 0, len(choice.media))
+		filtered := make([]ProviderMedia, 0, len(choice.media))
 		for _, option := range choice.media {
 			if option.Quality == quality {
 				filtered = append(filtered, option)
@@ -55,6 +56,19 @@ func nativePlaybackChoices(media providerMedia, quality int) nativePlaybackChoic
 	return choice
 }
 
+func (engine *nativeEngine) streamServer() (*nativeStreamServer, error) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if engine.stream == nil {
+		stream, err := newNativeStreamServer(engine.downloader)
+		if err != nil {
+			return nil, err
+		}
+		engine.stream = stream
+	}
+	return engine.stream, nil
+}
+
 func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativePlaybackChoice) (nativePlan, error) {
 	if err := ctx.Err(); err != nil {
 		return nativePlan{}, err
@@ -63,8 +77,7 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 		return nativePlan{}, errors.New("该集没有其他可用的播放线路")
 	}
 	media := choice.media[choice.index]
-	var err error
-	if !isProviderHTTPMediaURL(media.URL) {
+	if !IsProviderHTTPMediaURL(media.URL) {
 		return nativePlan{}, errors.New("站源未返回有效的播放地址")
 	}
 	tokenBytes := make([]byte, 24)
@@ -73,29 +86,21 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 	}
 	plan := nativePlan{
 		DanmakuID: choice.danmakuVideo,
-		URL:       media.URL, Headers: map[string]string{"User-Agent": userAgent, "Referer": media.Referer},
+		URL:       media.URL, Headers: map[string]string{"User-Agent": UserAgent, "Referer": media.Referer},
 		Key: hex.EncodeToString(media.CENCKey), Quality: media.Quality, Qualities: choice.qualities,
 		RouteIndex: choice.index, RouteCount: len(choice.media), Session: hex.EncodeToString(tokenBytes),
 	}
-	if media.credentials != nil && !media.credentials.expires.IsZero() {
-		if !time.Now().Before(media.credentials.expires) {
+	if media.Credentials != nil && !media.Credentials.Expires.IsZero() {
+		if !time.Now().Before(media.Credentials.Expires) {
 			return nativePlan{}, errors.New("播放凭证已过期，请重新解析播放")
 		}
-		plan.ExpiresAt = media.credentials.expires.UnixMilli()
+		plan.ExpiresAt = media.Credentials.Expires.UnixMilli()
 	}
-	choice.streamSession = ""
-	{
-		engine.mu.Lock()
-		if engine.stream == nil {
-			engine.stream, err = newNativeStreamServer(engine.downloader)
-		}
-		stream := engine.stream
-		engine.mu.Unlock()
-		if err != nil {
-			return nativePlan{}, err
-		}
-		plan.URL, choice.streamSession = stream.nativeOpen(media)
+	stream, err := engine.streamServer()
+	if err != nil {
+		return nativePlan{}, err
 	}
+	plan.URL, choice.streamSession = stream.nativeOpen(media)
 	choice.created = time.Now()
 	engine.mu.Lock()
 	if engine.playbacks == nil {
@@ -119,12 +124,9 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 		delete(engine.playbacks, oldest)
 	}
 	engine.playbacks[plan.Session] = choice
-	stream := engine.stream
 	engine.mu.Unlock()
-	if stream != nil {
-		for _, token := range expired {
-			stream.nativeRelease(token)
-		}
+	for _, token := range expired {
+		stream.nativeRelease(token)
 	}
 	if err := ctx.Err(); err != nil {
 		engine.nativeReleasePlayback(plan.Session)

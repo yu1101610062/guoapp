@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../playback_preferences.dart';
 import '../../playback_session.dart';
@@ -14,9 +13,11 @@ import '../widgets/motion/motion_widgets.dart';
 import 'danmaku_overlay.dart';
 import 'fade_presence.dart';
 import 'playback_handle.dart';
+import 'player_status.dart';
 import 'player_surface.dart';
+import 'player_video.dart';
 
-enum _Menu { speed, quality }
+enum _Menu { speed, quality, fit }
 
 final _arrows = {
   LogicalKeyboardKey.arrowUp,
@@ -50,6 +51,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
   final _danmaku = FocusNode();
   final _speed = FocusNode();
   final _quality = FocusNode();
+  final _fit = FocusNode();
   final _retry = FocusNode();
   final _options = <FocusNode>[];
   final _links = {for (final menu in _Menu.values) menu: LayerLink()};
@@ -97,6 +99,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
       _danmaku,
       _speed,
       _quality,
+      _fit,
       _retry,
       ..._options,
     ]) {
@@ -117,7 +120,11 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
       unawaited(_playing?.cancel());
       _playing = player.stream.playing.listen((playing) {
         if (!mounted) return;
-        playing ? _scheduleHide() : _reveal();
+        if (playing) {
+          _scheduleHide();
+        } else if (_session.paused || !_session.hasNext) {
+          _reveal();
+        }
         setState(() {});
       });
     }
@@ -234,6 +241,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
     if (_session.danmakuSupported) _danmaku,
     _speed,
     _quality,
+    _fit,
   ];
 
   bool _enabled(FocusNode node) =>
@@ -242,6 +250,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
       node == _speed && _session.ready ||
       node == _quality && _session.ready && !_session.local ||
       node == _play ||
+      node == _fit ||
       node == _danmaku;
 
   void _moveInRow(FocusNode from, int direction) {
@@ -258,16 +267,19 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
   List<Object> _values(_Menu menu) => switch (menu) {
     _Menu.speed => playbackSpeeds.reversed.toList(),
     _Menu.quality => [..._session.qualities, 0],
+    _Menu.fit => VideoFit.values,
   };
 
   Object _selected(_Menu menu) => switch (menu) {
     _Menu.speed => _session.speed,
     _Menu.quality => _session.quality,
+    _Menu.fit => _session.videoFit,
   };
 
   FocusNode _button(_Menu menu) => switch (menu) {
     _Menu.speed => _speed,
     _Menu.quality => _quality,
+    _Menu.fit => _fit,
   };
 
   void _openMenu(_Menu menu) {
@@ -300,6 +312,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
         () => switch (menu) {
           _Menu.speed => _session.setSpeed(value as double),
           _Menu.quality => _session.setQuality(value as int),
+          _Menu.fit => _session.setVideoFit(value as VideoFit),
         },
       ),
     );
@@ -423,16 +436,17 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
                 body: Stack(
                   fit: StackFit.expand,
                   children: [
-                    Video(
+                    PlayerVideo(
                       key: ValueKey(_session.player),
-                      controller: widget.handle.video(_session.player),
-                      controls: NoVideoControls,
-                      fill: Colors.black,
-                      pauseUponEnteringBackgroundMode: false,
+                      handle: widget.handle,
+                      player: _session.player,
+                      fit: _session.videoFit,
                     ),
                     DanmakuOverlay(
                       controller: _session.danmaku,
-                      aspectRatio: _session.aspectRatio,
+                      video: _session.videoSize,
+                      fit: _session.videoFit,
+                      style: _session.danmakuStyle,
                     ),
                     FadePresence(
                       duration: Motion.medium,
@@ -486,6 +500,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
     final colors = Theme.of(context).colorScheme;
     final playing = _session.player.state.playing;
     final menu = _menu;
+    final preferences = _session.preferences;
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -495,17 +510,36 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
           left: televisionInset,
           right: televisionInset,
           top: 27,
-          child: Text(
-            '${_session.detail.drama.title} 第 ${_session.episode.number} 集',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 24,
-              fontWeight: FontWeight.w700,
-              height: 1.3,
-              shadows: [Shadow(color: Color(0x66000000), blurRadius: 3)],
-            ),
+          child: Row(
+            spacing: 24,
+            children: [
+              Expanded(
+                child: Text(
+                  '${_session.detail.drama.title} 第 ${_session.episode.number} 集',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700,
+                    height: 1.3,
+                    shadows: [Shadow(color: Color(0x66000000), blurRadius: 3)],
+                  ),
+                ),
+              ),
+              if (_visible &&
+                  (preferences.showNetworkSpeed || preferences.showClock)) ...[
+                Row(
+                  spacing: 16,
+                  children: [
+                    if (preferences.showNetworkSpeed)
+                      NetworkSpeedText(session: _session, style: _statusStyle),
+                    if (preferences.showClock)
+                      const ClockText(style: _statusStyle),
+                  ],
+                ),
+              ],
+            ],
           ),
         ),
         _progress(bottom: 103, focusable: true),
@@ -558,6 +592,15 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
                   () => _openMenu(_Menu.quality),
                 ),
               ),
+              CompositedTransformTarget(
+                link: _links[_Menu.fit]!,
+                child: _pill(
+                  _fit,
+                  '比例 ${_session.videoFit.label}',
+                  '画面比例',
+                  () => _openMenu(_Menu.fit),
+                ),
+              ),
             ],
           ),
         ),
@@ -577,6 +620,15 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
       ],
     );
   }
+
+  static const _statusStyle = TextStyle(
+    color: Colors.white,
+    fontSize: 24,
+    fontWeight: FontWeight.w600,
+    height: 1.3,
+    fontFeatures: [FontFeature.tabularFigures()],
+    shadows: [Shadow(color: Color(0x99000000), blurRadius: 3)],
+  );
 
   Widget _bubble() {
     final forward = _seekOffset >= 0;
@@ -620,6 +672,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
         height: 28,
         child: PlaybackProgressBuilder(
           player: _session.player,
+          active: !focusable || _visible,
           builder: (context) => ListenableBuilder(
             listenable: _bar,
             builder: (context, _) => _progressRow(
@@ -906,6 +959,7 @@ class _TelevisionPlayerPageState extends State<TelevisionPlayerPage>
     String label(Object value) => switch (menu) {
       _Menu.speed => '${value}x',
       _Menu.quality => value == 0 ? '自动' : '${value}P',
+      _Menu.fit => (value as VideoFit).label,
     };
     return Container(
       padding: const EdgeInsets.all(8),

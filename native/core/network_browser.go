@@ -24,7 +24,7 @@ type browserHTTPClient interface {
 type huangguoBrowserTransport struct {
 	base      http.RoundTripper
 	router    *proxyRouter
-	host      string
+	baseURL   func(string) string
 	insecure  bool
 	record    func(diagnosticEvent)
 	mu        sync.Mutex
@@ -33,9 +33,8 @@ type huangguoBrowserTransport struct {
 }
 
 func newHuangguoBrowserTransport(base http.RoundTripper, downloader *Downloader) *huangguoBrowserTransport {
-	configured, _ := url.Parse(downloader.providerBaseURL(sourceHuangguoVideo))
 	transport := &huangguoBrowserTransport{
-		base: base, router: downloader.proxyRouter, host: configured.Host,
+		base: base, router: downloader.proxyRouter, baseURL: downloader.providerBaseURL,
 		insecure: downloader.cfg.InsecureTLS, record: downloader.recordDiagnostic,
 		clients: make(map[string]browserHTTPClient),
 	}
@@ -46,7 +45,26 @@ func newHuangguoBrowserTransport(base http.RoundTripper, downloader *Downloader)
 func (transport *huangguoBrowserTransport) matches(request *http.Request) bool {
 	return (request.Method == http.MethodGet || request.Method == http.MethodHead) &&
 		(request.URL.Scheme == "http" || request.URL.Scheme == "https") &&
-		(strings.EqualFold(request.URL.Host, transport.host) || strings.EqualFold(request.URL.Hostname(), "huangguo.video"))
+		transport.source(request.URL) != ""
+}
+
+func (transport *huangguoBrowserTransport) source(address *url.URL) string {
+	host, hostname := strings.ToLower(address.Host), strings.ToLower(address.Hostname())
+	for _, descriptor := range registeredDescriptors() {
+		if !descriptor.BrowserFingerprint {
+			continue
+		}
+		names := descriptor.Aliases
+		if configured, err := url.Parse(transport.baseURL(descriptor.ID)); err == nil && configured.Host != "" {
+			names = append([]string{configured.Host}, names...)
+		}
+		for _, name := range names {
+			if name = strings.ToLower(name); name == host || name == hostname {
+				return descriptor.ID
+			}
+		}
+	}
+	return ""
 }
 
 func (transport *huangguoBrowserTransport) createClient(proxy string) (browserHTTPClient, error) {
@@ -116,9 +134,9 @@ func huangguoBrowserHeaders(request *http.Request) fhttp.Header {
 		fhttp.HeaderOrderKey:        {"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "upgrade-insecure-requests", "user-agent", "accept", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest", "referer", "accept-encoding", "accept-language", "cookie"},
 	}
 	if mode := request.Header.Get("Sec-Fetch-Mode"); mode != "" && mode != "navigate" {
-		headers["accept"] = []string{firstNonEmpty(request.Header.Get("Accept"), "*/*")}
+		headers["accept"] = []string{FirstNonEmpty(request.Header.Get("Accept"), "*/*")}
 		headers["sec-fetch-mode"] = []string{mode}
-		headers["sec-fetch-dest"] = []string{firstNonEmpty(request.Header.Get("Sec-Fetch-Dest"), "empty")}
+		headers["sec-fetch-dest"] = []string{FirstNonEmpty(request.Header.Get("Sec-Fetch-Dest"), "empty")}
 		delete(headers, "upgrade-insecure-requests")
 		delete(headers, "sec-fetch-user")
 	}
@@ -151,7 +169,7 @@ func (transport *huangguoBrowserTransport) RoundTrip(request *http.Request) (*ht
 	}
 	client, err := transport.client(request)
 	if err != nil {
-		return nil, fmt.Errorf("黄果浏览器客户端初始化失败：%w", publicError(err))
+		return nil, fmt.Errorf("浏览器指纹客户端初始化失败：%w", PublicError(err))
 	}
 	upstream, err := fhttp.NewRequestWithContext(request.Context(), request.Method, request.URL.String(), request.Body)
 	if err != nil {
@@ -166,7 +184,7 @@ func (transport *huangguoBrowserTransport) RoundTrip(request *http.Request) (*ht
 		if response != nil && response.Body != nil {
 			response.Body.Close()
 		}
-		return nil, publicError(err)
+		return nil, PublicError(err)
 	}
 	result := &http.Response{
 		Status: response.Status, StatusCode: response.StatusCode,
@@ -186,10 +204,10 @@ func (transport *huangguoBrowserTransport) RoundTrip(request *http.Request) (*ht
 		if result.StatusCode >= 400 || strings.EqualFold(result.Header.Get("Cf-Mitigated"), "challenge") {
 			level = "warning"
 		}
-		transport.record(diagnosticEvent{Event: "network.browser_request", Level: level, Source: sourceHuangguoVideo,
+		transport.record(diagnosticEvent{Event: "network.browser_request", Level: level, Source: transport.source(request.URL),
 			Host: request.URL.Hostname(), HTTPStatus: result.StatusCode, Client: huangguoBrowserProfile,
-			Protocol: result.Proto, CFRay: truncate(result.Header.Get("Cf-Ray"), 128),
-			ResponseType: truncate(result.Header.Get("Content-Type"), 128), Message: "黄果浏览器指纹请求完成"})
+			Protocol: result.Proto, CFRay: Truncate(result.Header.Get("Cf-Ray"), 128),
+			ResponseType: Truncate(result.Header.Get("Content-Type"), 128), Message: "浏览器指纹请求完成"})
 	}
 	return result, nil
 }

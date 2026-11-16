@@ -16,14 +16,14 @@ type requestGate struct {
 	lastStart time.Time
 }
 
-type requestBackoff struct {
+type RequestBackoff struct {
 	host   string
 	until  time.Time
 	status int
 	reason string
 }
 
-func (backoff *requestBackoff) Error() string {
+func (backoff *RequestBackoff) Error() string {
 	reason := ""
 	if backoff.reason != "" {
 		reason = "：" + backoff.reason
@@ -56,7 +56,7 @@ func (d *Downloader) catalogResponseError(request *http.Request, response *http.
 	if d.limiter != nil && (response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusTooManyRequests || reason != "") {
 		d.limiter.mu.Lock()
 		backoffs := d.limiter.backoffs
-		if background, _ := request.Context().Value(backgroundCatalogKey{}).(bool); background && response.StatusCode != http.StatusTooManyRequests {
+		if background, _ := request.Context().Value(BackgroundCatalogKey{}).(bool); background && response.StatusCode != http.StatusTooManyRequests {
 			backoffs = d.limiter.backgroundBackoffs
 		}
 		if previous := backoffs[host]; previous != nil && previous.status == response.StatusCode {
@@ -84,12 +84,15 @@ type requestLimiter struct {
 	interval           time.Duration
 	mu                 sync.Mutex
 	gates              map[string]*requestGate
-	backoffs           map[string]*requestBackoff
-	backgroundBackoffs map[string]*requestBackoff
+	backoffs           map[string]*RequestBackoff
+	backgroundBackoffs map[string]*RequestBackoff
+	forbiddenStreaks   map[string]int
 	changed            chan struct{}
 }
 
-type backgroundCatalogKey struct{}
+const forbiddenStreakLimit = 3
+
+type BackgroundCatalogKey struct{}
 
 type requestLaneKey struct{}
 
@@ -97,7 +100,7 @@ func newRequestLimiter(concurrency int, interval time.Duration) *requestLimiter 
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	return &requestLimiter{concurrency: concurrency, interval: interval, gates: map[string]*requestGate{}, backoffs: map[string]*requestBackoff{}, backgroundBackoffs: map[string]*requestBackoff{}, changed: make(chan struct{})}
+	return &requestLimiter{concurrency: concurrency, interval: interval, gates: map[string]*requestGate{}, backoffs: map[string]*RequestBackoff{}, backgroundBackoffs: map[string]*RequestBackoff{}, forbiddenStreaks: map[string]int{}, changed: make(chan struct{})}
 }
 
 func (limiter *requestLimiter) notifyLocked() {
@@ -106,9 +109,9 @@ func (limiter *requestLimiter) notifyLocked() {
 }
 
 func (limiter *requestLimiter) acquire(ctx context.Context, request *http.Request) (func(), error) {
-	background, _ := ctx.Value(backgroundCatalogKey{}).(bool)
+	background, _ := ctx.Value(BackgroundCatalogKey{}).(bool)
 	host := strings.ToLower(request.URL.Hostname())
-	source := providerSourceForURL(request.URL.String())
+	source := ProviderSourceForURL(request.URL.String())
 	if source == "" {
 		source = host
 		if strings.HasSuffix(host, ".cloudfront.net") {
@@ -195,10 +198,27 @@ func (limiter *requestLimiter) acquire(ctx context.Context, request *http.Reques
 }
 
 func (limiter *requestLimiter) observe(request *http.Request, response *http.Response) {
-	if response.StatusCode != http.StatusForbidden && response.StatusCode != http.StatusTooManyRequests && !strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge") {
+	host := strings.ToLower(request.URL.Hostname())
+	challenged := strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge")
+	limiter.mu.Lock()
+	if response.StatusCode == http.StatusForbidden && !challenged {
+		limiter.forbiddenStreaks[host]++
+	} else {
+		delete(limiter.forbiddenStreaks, host)
+	}
+	repeatedlyForbidden := limiter.forbiddenStreaks[host] >= forbiddenStreakLimit
+	limiter.mu.Unlock()
+	if response.StatusCode != http.StatusTooManyRequests && !challenged && !repeatedlyForbidden {
 		return
 	}
 	limiter.observeBlock(request, response)
+}
+
+func (limiter *requestLimiter) observeMedia(request *http.Request, response *http.Response) {
+	if response.StatusCode == http.StatusForbidden && !strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge") {
+		return
+	}
+	limiter.observe(request, response)
 }
 
 func (limiter *requestLimiter) observeBlock(request *http.Request, response *http.Response) {
@@ -214,11 +234,11 @@ func (limiter *requestLimiter) observeBlock(request *http.Request, response *htt
 	host := strings.ToLower(request.URL.Hostname())
 	limiter.mu.Lock()
 	backoffs := limiter.backoffs
-	if background, _ := request.Context().Value(backgroundCatalogKey{}).(bool); background && response.StatusCode != http.StatusTooManyRequests {
+	if background, _ := request.Context().Value(BackgroundCatalogKey{}).(bool); background && response.StatusCode != http.StatusTooManyRequests {
 
 		backoffs = limiter.backgroundBackoffs
 	}
-	backoffs[host] = &requestBackoff{host: host, until: time.Now().Add(delay), status: response.StatusCode}
+	backoffs[host] = &RequestBackoff{host: host, until: time.Now().Add(delay), status: response.StatusCode}
 	limiter.notifyLocked()
 	limiter.mu.Unlock()
 }
@@ -239,7 +259,7 @@ func (d *Downloader) doCatalogRequestWithTimeout(request *http.Request, timeout 
 }
 
 func (d *Downloader) doPreparedCatalogRequest(request *http.Request, timeout time.Duration, prepare func(*http.Request)) (*http.Response, error) {
-	if background, _ := request.Context().Value(backgroundCatalogKey{}).(bool); background && (timeout <= 0 || timeout > 8*time.Second) {
+	if background, _ := request.Context().Value(BackgroundCatalogKey{}).(bool); background && (timeout <= 0 || timeout > 8*time.Second) {
 		timeout = 8 * time.Second
 	}
 	release, err := d.limiter.acquire(request.Context(), request)

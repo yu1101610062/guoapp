@@ -246,6 +246,7 @@ class FakeRepository extends AppRepository {
 
   @override
   Future<CatalogPage> recommendations(
+    String source,
     String genre, {
     bool more = false,
     bool force = false,
@@ -259,15 +260,18 @@ class FakeRepository extends AppRepository {
 
   @override
   Future<RankingPage> rankings(
-    String board, {
+    RankingBoard board, {
     int page = 1,
     bool force = false,
   }) async {
-    rankingRequests.add('$board|$page${force ? '!' : ''}');
+    rankingRequests.add('${board.id}|$page${force ? '!' : ''}');
     return RankingPage(
       items: [
         for (var rank = page * 2 - 1; rank <= page * 2; rank++)
-          RankingItem(rank, drama('$board-$rank', title: '$board第$rank名')),
+          RankingItem(
+            rank,
+            drama('${board.id}-$rank', title: '${board.id}第$rank名'),
+          ),
       ],
       page: page,
       hasMore: page < 2,
@@ -292,7 +296,8 @@ class FakeRepository extends AppRepository {
       cachedPages['$source|$category'] ?? CatalogPage(const []);
 
   @override
-  Future<List<String>> suggestions(String query) async => suggestionList;
+  Future<List<String>> suggestions(String source, String query) async =>
+      suggestionList;
 
   @override
   Future<String> cover(Drama drama, {bool force = false}) async =>

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../drama_feed.dart';
@@ -5,6 +7,7 @@ import '../../explore_feed.dart';
 import '../../local_store.dart';
 import '../../models.dart';
 import '../app_scope.dart';
+import '../cover_blur.dart';
 import '../shell/app_shell.dart';
 import '../theme/motion.dart';
 import '../detail/detail_page.dart';
@@ -12,10 +15,12 @@ import '../widgets/bar_button.dart';
 import '../widgets/category_tabs.dart';
 import '../widgets/choice_panel.dart';
 import '../widgets/drama_grid.dart';
+import '../widgets/follow_button.dart';
 import '../widgets/motion/motion_widgets.dart';
 import '../widgets/page_header.dart';
 import '../widgets/source_bar.dart';
 import '../widgets/status_view.dart';
+import '../widgets/swipe_switch.dart';
 import 'explore_hero.dart';
 import 'source_actions.dart';
 
@@ -32,6 +37,7 @@ class ExplorePageState extends State<ExplorePage> {
   final _scroll = ScrollController();
   final _search = TextEditingController();
   final _tabsKey = GlobalKey();
+  final _refreshKey = GlobalKey<RefreshIndicatorState>();
   String _shown = '';
 
   @override
@@ -53,9 +59,39 @@ class ExplorePageState extends State<ExplorePage> {
     await _explore?.refresh();
   }
 
-  void _open(Drama drama) => openPage<void>(
+  void reselect() {
+    if (!_scroll.hasClients) return;
+    if (_scroll.offset <= 0) {
+      unawaited(_refreshKey.currentState?.show());
+      return;
+    }
+    unawaited(
+      _scroll.animateTo(
+        0,
+        duration: Motion.of(context, Motion.long),
+        curve: Motion.enter,
+      ),
+    );
+  }
+
+  void _selectTab(String id) {
+    if (id != _explore!.tab.id) {
+      _explore!.select(id);
+      return;
+    }
+    if (!_scroll.hasClients || _scroll.offset <= 0) return;
+    unawaited(
+      _scroll.animateTo(
+        0,
+        duration: Motion.of(context, Motion.long),
+        curve: Motion.enter,
+      ),
+    );
+  }
+
+  void _open(Drama drama, {bool autoplay = false}) => openPage<void>(
     context,
-    (_) => DetailPage(store: widget.store, drama: drama),
+    (_) => DetailPage(store: widget.store, drama: drama, autoplay: autoplay),
   );
 
   Future<void> _pickCategory(BuildContext anchor) async {
@@ -76,25 +112,26 @@ class ExplorePageState extends State<ExplorePage> {
     openSearch(context, widget.store, source, query: query);
   }
 
-  void _resetScroll(ExploreFeed explore) {
-    final shown = '${explore.source?.id}|${explore.tab.id}';
+  void _resetScroll(ExploreFeed explore, {required bool deferred}) {
+    final source = '${explore.source?.id}|';
+    final shown = '$source${explore.tab.id}';
     if (shown == _shown) return;
+    final switched = _shown.startsWith(source);
     _shown = shown;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) _scroll.jumpTo(0);
-    });
+    if (deferred && switched) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _toTop());
   }
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _explore!,
+    listenable: Listenable.merge([_explore!, widget.store]),
     builder: (context, _) {
       final explore = _explore!;
       final source = explore.source;
       final form = AppScope.formFactorOf(context);
       final television = form == FormFactor.television;
       final desktop = form == FormFactor.window;
-      _resetScroll(explore);
+      _resetScroll(explore, deferred: _swipes(form));
       if (source == null) {
         return Scaffold(
           body: SafeArea(
@@ -102,12 +139,20 @@ class ExplorePageState extends State<ExplorePage> {
             child: Column(
               children: [
                 if (!television) const PageHeader(title: '发现'),
-                const Expanded(
-                  child: StatusView(
-                    title: '暂无可用站源',
-                    message: '请在站源管理中开启站源，或联系管理员开放权限。',
-                    icon: Icons.public_off_rounded,
-                  ),
+                Expanded(
+                  child: SourceSite.values.isEmpty
+                      ? StatusView(
+                          title: '还没有安装站源',
+                          message: widget.store.profile.admin
+                              ? '站源以模块的形式提供，请在 我的 › 模块 安装。'
+                              : '请联系管理员安装站源模块。',
+                          icon: Icons.extension_off_rounded,
+                        )
+                      : const StatusView(
+                          title: '暂无可用站源',
+                          message: '请在 我的 › 模块 中开启站源，或联系管理员开放权限。',
+                          icon: Icons.public_off_rounded,
+                        ),
                 ),
               ],
             ),
@@ -129,7 +174,7 @@ class ExplorePageState extends State<ExplorePage> {
             for (final tab in explore.tabs) ChoiceOption(tab.id, tab.name),
           ],
           selected: explore.tab.id,
-          onSelected: explore.select,
+          onSelected: _selectTab,
           onShowAll: _pickCategory,
         ),
       );
@@ -145,6 +190,17 @@ class ExplorePageState extends State<ExplorePage> {
                   onSwitchSource: (anchor) => pickSource(anchor, widget.store),
                   onOpenSearch: () => openSearch(context, widget.store, source),
                   onSearchSubmitted: (query) => _searchSubmitted(source, query),
+                  leading: [
+                    if (widget.store.blurCoversButton)
+                      if (CoverBlurScope.of(context) case final blur?)
+                        BarButton(
+                          icon: blur.mode != CoverBlur.off
+                              ? Icons.visibility_off_rounded
+                              : Icons.visibility_rounded,
+                          tooltip: blur.mode != CoverBlur.off ? '显示封面' : '模糊封面',
+                          onPressed: blur.onToggle,
+                        ),
+                  ],
                   actions: [
                     if (desktop)
                       BarButton(
@@ -155,13 +211,44 @@ class ExplorePageState extends State<ExplorePage> {
                   ],
                 ),
               if (!television || explore.feed!.items.isEmpty) tabs,
-              Expanded(child: _content(explore, inset, television, tabs)),
+              Expanded(
+                child: _swipeTabs(
+                  explore,
+                  form,
+                  _content(explore, inset, television, tabs),
+                ),
+              ),
             ],
           ),
         ),
       );
     },
   );
+
+  bool _swipes(FormFactor form) =>
+      form == FormFactor.phone || form == FormFactor.pad;
+
+  Widget _swipeTabs(ExploreFeed explore, FormFactor form, Widget child) {
+    final tabs = explore.tabs;
+    final index = tabs.indexWhere((tab) => tab.id == explore.tab.id);
+    if (!_swipes(form) || index < 0) return child;
+    return SwipeSwitch(
+      key: ValueKey(explore.source?.id),
+      index: index,
+      count: tabs.length,
+      ready: switch (explore.feed) {
+        final feed? => feed.items.isNotEmpty || !feed.loading,
+        null => true,
+      },
+      onSwitch: (index) => explore.select(tabs[index].id),
+      onEnter: _toTop,
+      child: child,
+    );
+  }
+
+  void _toTop() {
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+  }
 
   Widget _content(
     ExploreFeed explore,
@@ -247,6 +334,7 @@ class ExplorePageState extends State<ExplorePage> {
               child: television
                   ? heroSection
                   : AnimatedSize(
+                      key: ValueKey(explore.tab.id),
                       duration: Motion.of(context, Motion.long),
                       curve: Motion.enter,
                       alignment: Alignment.topCenter,
@@ -263,9 +351,13 @@ class ExplorePageState extends State<ExplorePage> {
                 width: constraints.maxWidth - inset * 2,
                 items: items,
                 rankOf: explore.rankOf,
-                autofocus: television && hero == null,
+                autofocus:
+                    television && hero == null && ShellForeground.of(context),
                 heroScope: 'drama',
+                showScore: !explore.recommending,
+                exploreBlur: true,
                 onOpen: _open,
+                onMore: (drama) => quickFollow(context, widget.store, drama),
               ),
             ),
             SliverPadding(
@@ -285,7 +377,11 @@ class ExplorePageState extends State<ExplorePage> {
               feed: feed,
               child: television
                   ? scroll
-                  : RefreshIndicator(onRefresh: explore.refresh, child: scroll),
+                  : RefreshIndicator(
+                      key: _refreshKey,
+                      onRefresh: explore.refresh,
+                      child: scroll,
+                    ),
             ),
             Positioned(
               left: 0,
@@ -328,7 +424,7 @@ class ExplorePageState extends State<ExplorePage> {
             : '看到第 ${entry.episode} 集',
         progress: total > 0 ? entry.episode / total : null,
         action: '继续第 $next 集',
-        onPlay: () => _open(drama),
+        onPlay: () => _open(drama, autoplay: true),
         onDetail: () => _open(drama),
       );
     }
@@ -342,7 +438,7 @@ class ExplorePageState extends State<ExplorePage> {
           if (drama.episodes > 0) '共 ${drama.episodes} 集',
         ].join(' · '),
         action: '立即观看',
-        onPlay: () => _open(drama),
+        onPlay: () => _open(drama, autoplay: true),
         onDetail: () => _open(drama),
       );
     }

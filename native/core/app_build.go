@@ -2,30 +2,28 @@ package core
 
 import "errors"
 
-var buildAllSources = "false"
-
 var errNativeBuildSource = errors.New("当前版本不包含此站源")
 
 func nativeSourceAvailable(source string) bool {
-	source = canonicalProviderSource(source)
-	return source == sourceHongguo || buildAllSources == "true" && isHuangguoProviderSource(source)
+	_, ok := registeredDescriptor(canonicalProviderSource(source))
+	return ok
 }
 
-func nativeDramaAvailable(drama nativeDrama) bool {
-	source, _, valid := splitProviderDramaID(drama.ID)
+func nativeDramaAvailable(drama LibraryDrama) bool {
+	source, _, valid := SplitProviderDramaID(drama.ID)
 	return valid && nativeSourceAvailable(source) &&
 		(drama.Source == "" || canonicalProviderSource(drama.Source) == source)
 }
 
-func nativeChapterAvailable(drama nativeDrama, chapter Chapter) bool {
+func nativeChapterAvailable(drama LibraryDrama, chapter Chapter) bool {
 	if !nativeDramaAvailable(drama) {
 		return false
 	}
-	source, _, _ := splitProviderDramaID(drama.ID)
+	source, _, _ := SplitProviderDramaID(drama.ID)
 	if chapter.Source != "" && canonicalProviderSource(chapter.Source) != source {
 		return false
 	}
-	if chapterSource, _, valid := splitProviderDramaID(chapter.ID); valid && chapterSource != source {
+	if chapterSource, _, valid := SplitProviderDramaID(chapter.ID); valid && chapterSource != source {
 		return false
 	}
 	return true
@@ -35,10 +33,20 @@ func nativeDownloadAvailable(job nativeDownloadJob) bool {
 	return nativeChapterAvailable(job.Drama, job.Chapter)
 }
 
+func nativeActionSource(input nativeInput) string {
+	if input.Source != "" {
+		return canonicalProviderSource(input.Source)
+	}
+	if input.Action == "soraniAccount" {
+		return "sorani"
+	}
+	return ""
+}
+
 func nativeAuthorizeInput(input nativeInput) error {
 	switch input.Action {
-	case "recommendations", "cachedRecommendations", "suggestions", "danmaku":
-		if !nativeSourceAvailable(sourceHongguo) {
+	case "recommendations", "cachedRecommendations", "suggestions", "soraniAccount", "sourceAccount":
+		if !nativeSourceAvailable(nativeActionSource(input)) {
 			return errNativeBuildSource
 		}
 	case "rankings":
@@ -50,7 +58,11 @@ func nativeAuthorizeInput(input nativeInput) error {
 		if !nativeSourceAvailable(input.Source) {
 			return errNativeBuildSource
 		}
-	case "cover", "prepareCover", "detail", "metadata", "followCheck", "resolve", "preload", "enqueueDownloads", "localPlayback":
+	case "cast":
+		if input.Command == "play" && !nativeChapterAvailable(input.Drama, input.Chapter) {
+			return errNativeBuildSource
+		}
+	case "cover", "prepareCover", "detail", "seasons", "metadata", "followCheck", "resolve", "preload", "enqueueDownloads", "localPlayback":
 		if !nativeDramaAvailable(input.Drama) {
 			return errNativeBuildSource
 		}

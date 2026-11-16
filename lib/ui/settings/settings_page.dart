@@ -1,7 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../app_build.dart';
 import '../../local_store.dart';
 import '../../resource_settings_editor.dart';
 import '../app_scope.dart';
@@ -34,6 +35,52 @@ void openUsers(BuildContext context, LocalStore store) => openPage<void>(
           ),
         ),
 );
+
+Future<void> openProxySettings(BuildContext context, LocalStore store) =>
+    openPage<void>(context, (_) => _ProxySettingsPage(store: store));
+
+class _ProxySettingsPage extends StatefulWidget {
+  const _ProxySettingsPage({required this.store});
+  final LocalStore store;
+
+  @override
+  State<_ProxySettingsPage> createState() => _ProxySettingsPageState();
+}
+
+class _ProxySettingsPageState extends State<_ProxySettingsPage> {
+  ResourceSettingsEditor? _editor;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _editor ??= ResourceSettingsEditor(
+      AppScope.of(context).repository,
+      widget.store,
+    )..load();
+  }
+
+  @override
+  void dispose() {
+    _editor?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text(SettingsGroup.proxy.label)),
+    body: ListView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      children: [
+        SettingsSection(
+          group: SettingsGroup.proxy,
+          store: widget.store,
+          editor: _editor!,
+          open: (title, body) => _openFullPage(context, title, body),
+        ),
+      ],
+    ),
+  );
+}
 
 void _openFullPage(BuildContext context, String title, WidgetBuilder body) =>
     openPage<void>(
@@ -104,9 +151,11 @@ class _SettingsPageState extends State<SettingsPage> {
             : store.themeColor.label,
         displayModes[platformDisplayMode(store.displayMode)],
       ].join(' · '),
-      SettingsGroup.playback => '倍速、清晰度、连播与弹幕',
-      SettingsGroup.download => '默认画质、目录与空间、同时下载数量',
-      SettingsGroup.sources => allSourcesEnabled ? '站源管理、目录请求间隔' : '目录请求间隔',
+      SettingsGroup.playback => '倍速、清晰度、解码与手势',
+      SettingsGroup.danmaku => '字号、颜色、显示区域与屏蔽词',
+      SettingsGroup.download =>
+        Platform.isAndroid ? '默认画质、同时下载数量、自动导出' : '默认画质、VIP 集、同时下载数量',
+      SettingsGroup.storage => '下载目录、清理缓存、删除全部数据',
       SettingsGroup.proxy => '连接方式、代理地址',
       SettingsGroup.users => '当前：${store.profile.name}',
       SettingsGroup.sync => '追剧、观看进度与播放偏好',

@@ -1,10 +1,10 @@
-import 'package:duanju_app/app_build.dart';
 import 'package:duanju_app/explore_feed.dart';
 import 'package:duanju_app/local_store.dart';
 import 'package:duanju_app/ranking_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fakes.dart';
+import 'support/source_fixture.dart';
 
 Future<ExploreFeed> _open(
   FakeRepository repository, [
@@ -51,6 +51,26 @@ void main() {
     expect(explore.resume, isNull);
     expect(_titles(explore), ['分类short_play']);
   });
+
+  test(
+    'a visited tab comes back with its list, without asking again',
+    () async {
+      final repository = FakeRepository();
+      final explore = await _open(repository);
+      final picks = explore.feed;
+      final requests = repository.recommendRequests.length;
+
+      explore.select('short_play');
+      await pumpEventQueue();
+      expect(_titles(explore), ['分类short_play']);
+
+      explore.select(recommendTab.id);
+      expect(explore.feed, same(picks));
+      expect(_titles(explore), ['推荐剧二', '推荐剧三']);
+      await pumpEventQueue();
+      expect(repository.recommendRequests.length, requests);
+    },
+  );
 
   test('refresh forces the current tab only', () async {
     final repository = FakeRepository();

@@ -11,40 +11,25 @@ import (
 
 const rankingCacheTTL = 5 * time.Minute
 
-type rankingBoard struct {
+type RankingBoard struct {
 	ID          string `json:"id"`
 	Source      string `json:"source"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	path        string
-	upstreamKey string
+	Path        string `json:"-"`
+	UpstreamKey string `json:"-"`
 }
 
-var rankingBoards = []rankingBoard{
-	{ID: "hongguo-hot", Source: sourceHongguo, Name: "总热播榜", Description: "红果观看、互动等综合热度；每日更新。", path: "hot-drama", upstreamKey: "hongguo"},
-	{ID: "hongguo-real", Source: sourceHongguo, Name: "真人剧榜", Description: "红果真人剧热播榜；每日更新。", path: "hot-real-drama", upstreamKey: "real"},
-	{ID: "hongguo-comic", Source: sourceHongguo, Name: "漫剧榜", Description: "红果漫剧热播榜；每日更新。", path: "hot-comic-drama", upstreamKey: "comic"},
-	{ID: "hongguo-ai", Source: sourceHongguo, Name: "AI剧榜", Description: "红果 AI 剧热播榜；每日更新。", path: "hot-ai-drama", upstreamKey: "ai"},
-	{ID: "huangdou-all", Source: sourceHuangdou, Name: "总榜", Description: "黄豆短剧总榜，保留站点返回的顺序。", upstreamKey: "all"},
-	{ID: "huangdou-mogai", Source: sourceHuangdou, Name: "魔改榜", Description: "黄豆站点魔改榜。", upstreamKey: "mogai"},
-	{ID: "huangdou-search", Source: sourceHuangdou, Name: "搜索榜", Description: "黄豆站点搜索榜。", upstreamKey: "search"},
-	{ID: "huangdou-favorite", Source: sourceHuangdou, Name: "收藏榜", Description: "黄豆站点收藏榜。", upstreamKey: "favorite"},
-	{ID: "huangdou-finish", Source: sourceHuangdou, Name: "完结榜", Description: "黄豆站点完结榜。", upstreamKey: "finish"},
-	{ID: "huangguo-hot", Source: sourceHuangguoAI, Name: "热播榜", Description: "黄果站点热播 TOP 20；每日更新。", path: "hot"},
-	{ID: "huangguo-recommend", Source: sourceHuangguoAI, Name: "推荐榜", Description: "黄果站点推荐 TOP 20。", path: "recommend"},
-	{ID: "huangguo-potential", Source: sourceHuangguoAI, Name: "潜力榜", Description: "黄果站点潜力 TOP 20。", path: "potential"},
-}
-
-type rankingItem struct {
+type RankingItem struct {
 	Rank   int    `json:"rank"`
 	Drama  Drama  `json:"drama"`
 	Metric string `json:"metric,omitempty"`
 }
 
-type rankingPage struct {
+type RankingPage struct {
 	BoardID     string        `json:"boardId"`
 	Page        int           `json:"page"`
-	Items       []rankingItem `json:"items"`
+	Items       []RankingItem `json:"items"`
 	HasMore     bool          `json:"hasMore"`
 	TotalPages  int           `json:"totalPages,omitempty"`
 	UpdatedText string        `json:"updatedText,omitempty"`
@@ -55,36 +40,44 @@ type rankingPage struct {
 
 type rankingCall struct {
 	done chan struct{}
-	page rankingPage
+	page RankingPage
 	err  error
 }
 
 type rankingCache struct {
 	mu      sync.Mutex
-	pages   map[string]rankingPage
+	pages   map[string]RankingPage
 	pending map[string]*rankingCall
 }
 
-func findRankingBoard(id string) (rankingBoard, bool) {
-	for _, board := range rankingBoards {
+func allRankingBoards() []RankingBoard {
+	var boards []RankingBoard
+	for _, descriptor := range registeredDescriptors() {
+		boards = append(boards, descriptor.Rankings...)
+	}
+	return boards
+}
+
+func findRankingBoard(id string) (RankingBoard, bool) {
+	for _, board := range allRankingBoards() {
 		if board.ID == id {
 			return board, true
 		}
 	}
-	return rankingBoard{}, false
+	return RankingBoard{}, false
 }
 
-func cloneRankingPage(page rankingPage) rankingPage {
-	page.Items = append([]rankingItem{}, page.Items...)
+func cloneRankingPage(page RankingPage) RankingPage {
+	page.Items = append([]RankingItem{}, page.Items...)
 	return page
 }
 
-func (d *Downloader) loadRankingPage(ctx context.Context, board rankingBoard, page int, refresh bool) (rankingPage, error) {
+func (d *Downloader) loadRankingPage(ctx context.Context, board RankingBoard, page int, refresh bool) (RankingPage, error) {
 	key := board.ID + ":" + strconv.Itoa(page)
 	cache := &d.rankings
 	cache.mu.Lock()
 	if cache.pages == nil {
-		cache.pages = map[string]rankingPage{}
+		cache.pages = map[string]RankingPage{}
 		cache.pending = map[string]*rankingCall{}
 	}
 	cached, exists := cache.pages[key]
@@ -96,7 +89,7 @@ func (d *Downloader) loadRankingPage(ctx context.Context, board rankingBoard, pa
 		cache.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return rankingPage{}, ctx.Err()
+			return RankingPage{}, ctx.Err()
 		case <-pending.done:
 			if (errors.Is(pending.err, context.Canceled) || errors.Is(pending.err, context.DeadlineExceeded)) && ctx.Err() == nil {
 				return d.loadRankingPage(ctx, board, page, refresh)
@@ -134,7 +127,7 @@ func (d *Downloader) loadRankingPage(ctx context.Context, board rankingBoard, pa
 	} else if exists && ctx.Err() == nil && time.Since(cached.FetchedAt) >= 0 && time.Since(cached.FetchedAt) < 24*time.Hour {
 		result = cloneRankingPage(cached)
 		result.Stale = true
-		result.Warning = "站点暂不可用，显示上次取得的榜单，请稍后刷新。"
+		result.Warning = "榜单刷新失败（" + PublicError(err).Error() + "），显示上次取得的榜单。"
 		err = nil
 	}
 	pending.page, pending.err = cloneRankingPage(result), err
@@ -143,28 +136,11 @@ func (d *Downloader) loadRankingPage(ctx context.Context, board rankingBoard, pa
 	return result, err
 }
 
-func (d *Downloader) fetchRankingPage(ctx context.Context, board rankingBoard, page int) (rankingPage, error) {
-	switch board.Source {
-	case sourceHongguo:
-		return d.fetchHongguoRankingPage(ctx, board, page)
-	case sourceHuangdou:
-		var decoded any
-		err := newHuangdouAPIClient(d).call(ctx, "/drama/rank", map[string]any{"tab": board.upstreamKey, "page": strconv.Itoa(page)}, &decoded)
-		if err != nil {
-			return rankingPage{}, err
+func (d *Downloader) fetchRankingPage(ctx context.Context, board RankingBoard, page int) (RankingPage, error) {
+	if p, ok := d.provider(board.Source); ok {
+		if ranker, ok := providerAs[Ranker](p); ok {
+			return ranker.RankingPage(ctx, board, page)
 		}
-		return parseHuangdouRanking(decoded, page)
-	case sourceHuangguoAI:
-		if page != 1 {
-			return rankingPage{}, errors.New("该榜单只有一页")
-		}
-		pageURL := d.providerBaseURL(sourceHuangguoAI) + "/ranks/" + board.path + "/"
-		body, err := d.fetchProviderText(ctx, pageURL, d.providerBaseURL(sourceHuangguoAI)+"/")
-		if err != nil {
-			return rankingPage{}, err
-		}
-		return parseHuangguoRanking(body, board)
-	default:
-		return rankingPage{}, fmt.Errorf("不支持的榜单站源 %s", board.Source)
 	}
+	return RankingPage{}, fmt.Errorf("不支持的榜单站源 %s", board.Source)
 }

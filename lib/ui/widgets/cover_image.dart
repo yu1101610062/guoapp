@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 
@@ -6,6 +7,7 @@ import '../../core_bridge.dart';
 import '../../cover_loader.dart';
 import '../../models.dart';
 import '../app_scope.dart';
+import '../cover_blur.dart';
 import 'motion/motion_widgets.dart';
 
 const vipGold = Color(0xFFF6C86B);
@@ -41,10 +43,14 @@ class DramaCover extends StatelessWidget {
     this.details = true,
     this.rank,
     this.heroScope,
+    this.showScore = false,
+    this.exploreBlur = false,
   });
   final Drama drama;
   final double radius;
   final bool details;
+  final bool exploreBlur;
+  final bool showScore;
   final int? rank;
   final String? heroScope;
   static const imagesDisabled = bool.fromEnvironment('DISABLE_REMOTE_IMAGES');
@@ -78,13 +84,23 @@ class DramaCover extends StatelessWidget {
     // Always build the same wrapper so the CoverImage state is kept when the
     // hero condition flips; HeroMode just turns the flight on or off.
     final heroEnabled = heroScope != null && drama.id.isNotEmpty;
+    final blurred =
+        CoverBlurScope.of(context)?.blurs(drama, explore: exploreBlur) ?? false;
     image = HeroMode(
       enabled: heroEnabled,
       child: Hero(
         tag: coverHeroTag(drama.id, heroScope ?? ''),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(radius),
-          child: image,
+          child: ImageFiltered(
+            enabled: blurred,
+            imageFilter: ImageFilter.blur(
+              sigmaX: 16,
+              sigmaY: 16,
+              tileMode: TileMode.clamp,
+            ),
+            child: image,
+          ),
         ),
       ),
     );
@@ -106,13 +122,26 @@ class DramaCover extends StatelessWidget {
                 ),
               ),
             ),
-          if (details && drama.episodes > 0)
+          if (details && (drama.badge.isNotEmpty || drama.episodes > 0))
             Positioned(
               left: 9,
               bottom: 9,
               child: Text(
-                '共 ${drama.episodes} 集',
+                drama.badge.isNotEmpty ? drama.badge : '共 ${drama.episodes} 集',
                 style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+            ),
+          if (details && showScore && drama.score.isNotEmpty)
+            Positioned(
+              right: 9,
+              bottom: 9,
+              child: Text(
+                drama.score,
+                style: const TextStyle(
+                  color: Color(0xFFFFC542),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           if (details && drama.vip)

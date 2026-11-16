@@ -3,27 +3,25 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../picture_in_picture.dart';
 import '../../playback_session.dart';
-import '../app_scope.dart';
+import '../widgets/contained_slider.dart';
 import '../widgets/focus_ring.dart';
 import 'playback_handle.dart';
 import 'player_surface.dart';
+import 'player_video.dart';
 
 bool playerVisible(AppLifecycleState? state) =>
     state == AppLifecycleState.resumed ||
-    desktopPlatform && state == AppLifecycleState.inactive ||
-    PictureInPicture.instance.keepsPlaying(state);
+    state == AppLifecycleState.inactive ||
+    PictureInPicture.instance.active;
 
-Widget _video(PlaybackHandle handle) => Video(
+Widget _video(PlaybackHandle handle) => PlayerVideo(
   key: ValueKey(handle.session.player),
-  controller: handle.video(handle.session.player),
-  controls: NoVideoControls,
-  fill: Colors.black,
-  pauseUponEnteringBackgroundMode: false,
+  handle: handle,
+  player: handle.session.player,
 );
 
 const _spinner = IgnorePointer(
@@ -238,23 +236,25 @@ class _MiniWindowViewState extends State<MiniWindowView> {
         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
         overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
       ),
-      child: Slider(
-        value: (_seekValue ?? state.position.inMilliseconds.toDouble()).clamp(
-          0.0,
-          max,
+      child: ContainedSlider(
+        slider: Slider(
+          value: (_seekValue ?? state.position.inMilliseconds.toDouble()).clamp(
+            0.0,
+            max,
+          ),
+          max: max,
+          semanticFormatterCallback: (value) =>
+              formatClock(Duration(milliseconds: value.round())),
+          onChanged: enabled
+              ? (value) => setState(() => _seekValue = value)
+              : null,
+          onChangeEnd: (value) {
+            setState(() => _seekValue = null);
+            if (enabled) {
+              unawaited(session.seekTo(Duration(milliseconds: value.round())));
+            }
+          },
         ),
-        max: max,
-        semanticFormatterCallback: (value) =>
-            formatClock(Duration(milliseconds: value.round())),
-        onChanged: enabled
-            ? (value) => setState(() => _seekValue = value)
-            : null,
-        onChangeEnd: (value) {
-          setState(() => _seekValue = null);
-          if (enabled) {
-            unawaited(session.seekTo(Duration(milliseconds: value.round())));
-          }
-        },
       ),
     );
   }

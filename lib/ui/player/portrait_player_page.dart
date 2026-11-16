@@ -1,18 +1,20 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../local_store.dart';
 import '../../models.dart';
+import '../../playback_preferences.dart';
 import '../../playback_session.dart';
 import '../app_scope.dart';
 import '../downloads/download_actions.dart';
 import '../theme/app_theme.dart';
 import '../theme/motion.dart';
+import '../widgets/contained_slider.dart';
 import '../widgets/follow_button.dart';
 import 'danmaku_overlay.dart';
 import 'episode_grid.dart';
@@ -20,7 +22,9 @@ import 'fade_presence.dart';
 import 'mini_player.dart';
 import 'playback_sheets.dart';
 import 'playback_handle.dart';
+import 'player_lock.dart';
 import 'player_surface.dart';
+import 'player_video.dart';
 import 'swipe_controls.dart';
 
 const _maskHeight = 68.0;
@@ -33,10 +37,12 @@ class PortraitPlayerPage extends StatefulWidget {
     super.key,
     required this.store,
     required this.handle,
+    this.onFullscreen,
     this.onMiniWindow,
   });
   final LocalStore store;
   final PlaybackHandle handle;
+  final VoidCallback? onFullscreen;
   final VoidCallback? onMiniWindow;
 
   @override
@@ -53,12 +59,24 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
   bool _scrolling = false;
   bool _edgeHinted = false;
   bool _holding = false;
-  bool _overMask = false;
+  bool _lockArmed = false;
   int _heldIndex = -1;
   bool _dragging = false;
   double? _seekValue;
   double? _seekTarget;
   Timer? _seekTimer;
+  Timer? _idleTimer;
+  bool _idle = false;
+  bool _quietSwitch = false;
+  late bool _lastPaused = _session.paused;
+  late int _lastIndex = _session.index;
+  bool _immersive = false;
+  EdgeInsets _bars = EdgeInsets.zero;
+  final _pointers = <int, Offset>{};
+  double? _pinchFrom;
+  double _pinchBase = 1;
+  double _zoom = 1;
+  bool _snapping = false;
 
   PlaybackSession get _session => widget.handle.session;
 
@@ -68,6 +86,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     WidgetsBinding.instance.addObserver(this);
     _session.addListener(_changed);
     _bind();
+    _wake();
   }
 
   @override
@@ -79,6 +98,14 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     }
     _hintTimer?.cancel();
     _seekTimer?.cancel();
+    _idleTimer?.cancel();
+    if (_immersive) {
+      unawaited(
+        SystemChrome.setEnabledSystemUIMode(
+          SystemUiMode.edgeToEdge,
+        ).catchError((Object _) {}),
+      );
+    }
     _pages.dispose();
     super.dispose();
   }
@@ -120,7 +147,77 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     _refresh();
   }
 
+  void _wake() {
+    _idleTimer?.cancel();
+    _idle = false;
+    _quietSwitch = false;
+    _idleTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _idle = true);
+    });
+  }
+
+  bool get _chromeShown =>
+      !_session.locked &&
+      (!_session.store.playbackPreferences.autoHideControls ||
+          !_idle ||
+          _dragging ||
+          _session.paused ||
+          _session.error != null ||
+          _session.loading && !_quietSwitch);
+
+  void _lock() {
+    if (_holding) _pressEnd();
+    unawaited(HapticFeedback.selectionClick());
+    _session.setLocked(true);
+    _say('已锁定，点屏幕显示锁图标');
+  }
+
+  void _unlock() {
+    unawaited(HapticFeedback.selectionClick());
+    _session.setLocked(false);
+    _wake();
+    _say('已解锁');
+  }
+
+  void _syncSystemBars() {
+    final immersive =
+        !desktopPlatform &&
+        _session.store.playbackPreferences.hideSystemBars &&
+        !_chromeShown;
+    if (immersive == _immersive) return;
+    _immersive = immersive;
+    unawaited(
+      SystemChrome.setEnabledSystemUIMode(
+        immersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      ).catchError((Object _) {}),
+    );
+  }
+
+  Widget _chrome(Widget child) {
+    final shown = _chromeShown;
+    return IgnorePointer(
+      ignoring: !shown,
+      child: AnimatedOpacity(
+        opacity: shown ? 1 : 0,
+        duration: Motion.of(context, Motion.medium),
+        curve: Motion.standard,
+        child: child,
+      ),
+    );
+  }
+
   void _refresh() {
+    final switched = _session.index != _lastIndex;
+    if (_session.paused != _lastPaused || switched) {
+      final quiet = switched && _idle && !_session.paused;
+      _lastPaused = _session.paused;
+      _lastIndex = _session.index;
+      if (quiet) {
+        _quietSwitch = true;
+      } else {
+        _wake();
+      }
+    }
     if (mounted) setState(() {});
   }
 
@@ -161,12 +258,14 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           page >= 0 &&
           page < _session.detail.episodes.length) {
         unawaited(_session.play(page));
+        setState(_wake);
       }
     }
     return false;
   }
 
   void _wheel(PointerSignalEvent event) {
+    if (_session.locked) return;
     if (event is! PointerScrollEvent || event.scrollDelta.dy == 0) return;
     GestureBinding.instance.pointerSignalResolver.register(event, (_) {
       if (_scrolling) return;
@@ -186,14 +285,100 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     });
   }
 
+  double _fitWidth(VideoFit fit, Size video) => fit
+      .size(
+        MediaQuery.sizeOf(context),
+        video,
+        MediaQuery.devicePixelRatioOf(context),
+      )
+      .width;
+
+  (double, double) get _zoomRange {
+    final video = _session.videoSize;
+    if (video == null || MediaQuery.sizeOf(context).isEmpty) return (1, 1);
+    final width = _fitWidth(_session.videoFit, video);
+    return (
+      _fitWidth(VideoFit.auto, video) / width,
+      _fitWidth(VideoFit.crop, video) / width,
+    );
+  }
+
+  bool get _pinching => _pinchFrom != null;
+
+  double get _span {
+    final [first, second, ...] = _pointers.values.toList();
+    return (first - second).distance;
+  }
+
+  void _pointerDown(PointerDownEvent event) {
+    if (_session.locked) return;
+    _pointers[event.pointer] = event.position;
+    if (_pointers.length != 2) return;
+    if (_holding) _pressEnd();
+    setState(() {
+      _pinchFrom = math.max(_span, 1);
+      _pinchBase = _zoom;
+    });
+  }
+
+  void _pointerMove(PointerMoveEvent event) {
+    if (_session.locked) return;
+    if (!_pointers.containsKey(event.pointer)) return;
+    _pointers[event.pointer] = event.position;
+    final from = _pinchFrom;
+    if (from == null || _pointers.length != 2) return;
+    final (low, high) = _zoomRange;
+    setState(() => _zoom = (_pinchBase * _span / from).clamp(low, high));
+  }
+
+  void _pointerUp(PointerEvent event) {
+    final from = _pinchFrom;
+    if (from != null && _pointers.length == 2) _settleZoom();
+    _pointers.remove(event.pointer);
+    if (_pointers.isEmpty && from != null) setState(() => _pinchFrom = null);
+  }
+
+  void _settleZoom() {
+    final fit = _session.videoFit;
+    final video = _session.videoSize;
+    final (low, high) = _zoomRange;
+    final threshold = fit == VideoFit.crop
+        ? high - (high - low) * .3
+        : low + (high - low) * .3;
+    final target =
+        video == null || high - low <= .01 || (_zoom - _pinchBase).abs() < .05
+        ? fit
+        : _zoom > threshold
+        ? VideoFit.crop
+        : VideoFit.auto;
+    if (target == fit) return setState(() => _zoom = 1);
+    setState(() {
+      _snapping = true;
+      _zoom *= _fitWidth(fit, video!) / _fitWidth(target, video);
+    });
+    unawaited(
+      _session.setVideoFit(target).catchError((Object _) => _saveFailed()),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _snapping = false;
+        _zoom = 1;
+      });
+    });
+    unawaited(HapticFeedback.selectionClick());
+    _say(target == VideoFit.crop ? '画面比例：裁切，双指捏合恢复' : '画面比例：自动');
+  }
+
   void _pressStart(LongPressStartDetails details, double width) {
-    if (details.localPosition.dx < width / 5) {
+    final x = details.localPosition.dx;
+    if (x < width / 5 || x > width * 4 / 5) {
       if (!_session.boostLocked) _session.holdBoost();
       unawaited(HapticFeedback.selectionClick());
       setState(() {
         _holding = true;
         _heldIndex = _session.index;
-        _overMask = false;
+        _lockArmed = false;
       });
     } else {
       unawaited(HapticFeedback.selectionClick());
@@ -203,26 +388,26 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
 
   void _pressMove(LongPressMoveUpdateDetails details) {
     if (!_holding) return;
-    final media = MediaQuery.of(context);
-    final over =
-        details.globalPosition.dy >=
-        media.size.height - media.padding.bottom - _maskHeight;
-    if (over != _overMask) {
+    final height = MediaQuery.sizeOf(context).height;
+    final armed =
+        details.localOffsetFromOrigin.dy >= height / 3 ||
+        details.globalPosition.dy >= height - _bars.bottom - _maskHeight;
+    if (armed != _lockArmed) {
       unawaited(HapticFeedback.selectionClick());
-      setState(() => _overMask = over);
+      setState(() => _lockArmed = armed);
     }
   }
 
   void _pressEnd() {
     if (!_holding) return;
-    if (_overMask) {
+    if (_lockArmed) {
       _session.setBoostLocked(!_session.boostLocked);
     } else if (!_session.boostLocked) {
       _session.endBoost();
     }
     setState(() {
       _holding = false;
-      _overMask = false;
+      _lockArmed = false;
     });
   }
 
@@ -264,23 +449,47 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
       value: AppTheme.systemBars(Brightness.dark),
       child: Theme(
         data: dark,
-        child: Scaffold(
-          backgroundColor: Colors.black,
-          body: Stack(
-            fit: StackFit.expand,
-            children: [
-              NotificationListener<ScrollNotification>(
-                onNotification: _scrolled,
-                child: PageView.builder(
-                  controller: _pages,
-                  scrollDirection: Axis.vertical,
-                  physics: const _PagePhysics(),
-                  itemCount: _session.detail.episodes.length,
-                  itemBuilder: _page,
+        child: PopScope(
+          canPop: !_session.locked,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _say('已锁定，点屏幕显示锁图标');
+          },
+          child: Scaffold(
+            backgroundColor: Colors.black,
+            body: Stack(
+              fit: StackFit.expand,
+              children: [
+                Listener(
+                  onPointerDown: _pointerDown,
+                  onPointerMove: _pointerMove,
+                  onPointerUp: _pointerUp,
+                  onPointerCancel: _pointerUp,
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: _scrolled,
+                    child: PageView.builder(
+                      controller: _pages,
+                      scrollDirection: Axis.vertical,
+                      physics: _pinching || _session.locked
+                          ? const NeverScrollableScrollPhysics()
+                          : const _PagePhysics(),
+                      itemCount: _session.detail.episodes.length,
+                      itemBuilder: _page,
+                    ),
+                  ),
                 ),
-              ),
-              IgnorePointer(ignoring: _scrolling, child: _controls(context)),
-            ],
+                IgnorePointer(ignoring: _scrolling, child: _controls(context)),
+                PlayerLockOverlay(
+                  locked: _session.locked,
+                  alignment: Alignment.topRight,
+                  padding: EdgeInsets.only(
+                    top: MediaQuery.paddingOf(context).top + 6,
+                    right: 12,
+                  ),
+                  onUnlock: _unlock,
+                  onBlocked: () => _say('已锁定，点击锁图标解锁'),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -302,12 +511,20 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
         fit: StackFit.expand,
         children: [
           if (!waiting)
-            Video(
-              key: ValueKey(player),
-              controller: widget.handle.video(player),
-              controls: NoVideoControls,
-              fill: Colors.black,
-              pauseUponEnteringBackgroundMode: false,
+            ClipRect(
+              child: AnimatedScale(
+                scale: _zoom,
+                duration: _pinching || _snapping
+                    ? Duration.zero
+                    : Motion.of(context, Motion.medium),
+                curve: Motion.standard,
+                child: PlayerVideo(
+                  key: ValueKey(player),
+                  handle: widget.handle,
+                  player: player,
+                  fit: session.videoFit,
+                ),
+              ),
             ),
           FadePresence(
             duration: Motion.medium,
@@ -335,20 +552,26 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
             DanmakuOverlay(
               key: const ValueKey('danmaku'),
               controller: session.danmaku,
-              aspectRatio: session.aspectRatio,
+              video: session.videoSize,
+              fit: session.videoFit,
+              style: session.danmakuStyle,
             ),
             SwipeControls(
               key: const ValueKey('gestures'),
               session: session,
+              enabled: !_pinching && !_session.locked,
               child: LayoutBuilder(
                 builder: (context, constraints) => GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: session.togglePlayback,
-                  onLongPressStart: (details) =>
-                      _pressStart(details, constraints.maxWidth),
-                  onLongPressMoveUpdate: _pressMove,
-                  onLongPressEnd: (_) => _pressEnd(),
-                  onLongPressCancel: _pressEnd,
+                  onTap: _pinching || _session.locked
+                      ? null
+                      : session.togglePlayback,
+                  onLongPressStart: _pinching || _session.locked
+                      ? null
+                      : (details) => _pressStart(details, constraints.maxWidth),
+                  onLongPressMoveUpdate: _session.locked ? null : _pressMove,
+                  onLongPressEnd: _session.locked ? null : (_) => _pressEnd(),
+                  onLongPressCancel: _session.locked ? null : _pressEnd,
                 ),
               ),
             ),
@@ -360,22 +583,31 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
 
   Widget _controls(BuildContext context) {
     final session = _session;
-    final padding = MediaQuery.paddingOf(context);
+    final live = MediaQuery.paddingOf(context);
+    final padding = _bars = EdgeInsets.only(
+      top: math.max(_bars.top, live.top),
+      bottom: math.max(_bars.bottom, live.bottom),
+    );
     final bottom = padding.bottom;
     final locked = session.boostLocked;
+    _syncSystemBars();
     return Stack(
       fit: StackFit.expand,
       children: [
-        const IgnorePointer(
-          child: Align(
-            alignment: Alignment.topCenter,
-            child: _Shade(height: 130, top: true),
+        _chrome(
+          const IgnorePointer(
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: _Shade(height: 130, top: true),
+            ),
           ),
         ),
-        const IgnorePointer(
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: _Shade(height: 220, top: false),
+        _chrome(
+          const IgnorePointer(
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: _Shade(height: 220, top: false),
+            ),
           ),
         ),
         Center(
@@ -420,13 +652,26 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
             null => null,
           },
         ),
+        if (bottom > 0)
+          Positioned(
+            key: const ValueKey('system-gesture-guard'),
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: bottom,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: session.locked ? null : session.togglePlayback,
+              onVerticalDragStart: session.locked ? null : (_) {},
+            ),
+          ),
         Positioned(
           key: const ValueKey('header'),
           left: 4,
           right: 12,
           top: padding.top,
           height: 56,
-          child: _header(),
+          child: _chrome(_header()),
         ),
         Positioned(
           left: 0,
@@ -447,16 +692,41 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
           right: 16,
           bottom: bottom + 60,
           height: 32,
-          child: _progress(context),
+          child: _chrome(_progress(context)),
         ),
         Positioned(
           key: const ValueKey('episodes'),
           left: 16,
-          right: 16,
+          right: widget.onFullscreen == null ? 16 : 68,
           bottom: bottom + 16,
           height: 44,
-          child: _episodeStrip(),
+          child: _chrome(_episodeStrip()),
         ),
+        if (widget.onFullscreen case final onFullscreen?)
+          Positioned(
+            key: const ValueKey('fullscreen'),
+            right: 16,
+            bottom: bottom + 16,
+            width: 44,
+            height: 44,
+            child: _chrome(
+              IconButton(
+                onPressed: () {
+                  setState(_wake);
+                  onFullscreen();
+                },
+                icon: const Icon(Icons.fullscreen_rounded),
+                color: Colors.white,
+                tooltip: '全屏',
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.white.withValues(alpha: .14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ),
+          ),
         Positioned(
           left: 0,
           right: 0,
@@ -483,7 +753,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
                     spacing: 8,
                     children: [
                       Icon(
-                        !_overMask
+                        !_lockArmed
                             ? Icons.fast_forward_rounded
                             : locked
                             ? Icons.lock_open_rounded
@@ -492,7 +762,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
                         color: Colors.white,
                       ),
                       Text(
-                        '${_overMask ? '' : '下滑'}松手${locked ? '取消' : '锁定'} 2 倍速',
+                        '${_lockArmed ? '' : '下滑'}松手${locked ? '取消' : '锁定'} ${session.store.playbackPreferences.boostLabel}',
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 15,
@@ -606,6 +876,7 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
             ],
           ),
         ),
+        if (!desktopPlatform) PlayerLockButton(locked: false, onPressed: _lock),
         FollowIcon(
           store: widget.store,
           drama: session.detail.drama,
@@ -641,8 +912,11 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
     ),
   );
 
-  Widget _progress(BuildContext context) =>
-      PlaybackProgressBuilder(player: _session.player, builder: _progressBar);
+  Widget _progress(BuildContext context) => PlaybackProgressBuilder(
+    player: _session.player,
+    active: _chromeShown,
+    builder: _progressBar,
+  );
 
   Widget _progressBar(BuildContext context) {
     final session = _session;
@@ -670,42 +944,45 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
         overlayShape: SliderComponentShape.noOverlay,
         trackShape: const RoundedRectSliderTrackShape(),
       ),
-      child: Slider(
-        value: position,
-        max: max,
-        secondaryTrackValue: state.buffer.inMilliseconds.toDouble().clamp(
-          0.0,
-          max,
+      child: ContainedSlider(
+        slider: Slider(
+          value: position,
+          max: max,
+          secondaryTrackValue: state.buffer.inMilliseconds.toDouble().clamp(
+            0.0,
+            max,
+          ),
+          semanticFormatterCallback: (value) =>
+              formatClock(Duration(milliseconds: value.round())),
+          onChangeStart: seekable
+              ? (value) {
+                  _seekTimer?.cancel();
+                  _seekTarget = null;
+                  setState(() {
+                    _dragging = true;
+                    _seekValue = value;
+                  });
+                }
+              : null,
+          onChanged: seekable
+              ? (value) => setState(() => _seekValue = value)
+              : null,
+          onChangeEnd: (value) {
+            _dragging = false;
+            _wake();
+            if (seekable) {
+              _seekTarget = value;
+              _seekTimer?.cancel();
+              _seekTimer = Timer(const Duration(seconds: 2), () {
+                if (mounted) setState(_endSeek);
+              });
+              unawaited(session.seekTo(Duration(milliseconds: value.round())));
+              setState(() {});
+            } else {
+              setState(_endSeek);
+            }
+          },
         ),
-        semanticFormatterCallback: (value) =>
-            formatClock(Duration(milliseconds: value.round())),
-        onChangeStart: seekable
-            ? (value) {
-                _seekTimer?.cancel();
-                _seekTarget = null;
-                setState(() {
-                  _dragging = true;
-                  _seekValue = value;
-                });
-              }
-            : null,
-        onChanged: seekable
-            ? (value) => setState(() => _seekValue = value)
-            : null,
-        onChangeEnd: (value) {
-          _dragging = false;
-          if (seekable) {
-            _seekTarget = value;
-            _seekTimer?.cancel();
-            _seekTimer = Timer(const Duration(seconds: 2), () {
-              if (mounted) setState(_endSeek);
-            });
-            unawaited(session.seekTo(Duration(milliseconds: value.round())));
-            setState(() {});
-          } else {
-            setState(_endSeek);
-          }
-        },
       ),
     );
   }
@@ -768,14 +1045,14 @@ class _PortraitPlayerPageState extends State<PortraitPlayerPage>
       color: Colors.black.withValues(alpha: .5),
       borderRadius: BorderRadius.circular(16),
     ),
-    child: const Row(
+    child: Row(
       mainAxisSize: MainAxisSize.min,
       spacing: 6,
       children: [
-        Icon(Icons.fast_forward_rounded, size: 16, color: Colors.white),
+        const Icon(Icons.fast_forward_rounded, size: 16, color: Colors.white),
         Text(
-          '2 倍速播放中',
-          style: TextStyle(
+          '${_session.store.playbackPreferences.boostLabel}播放中',
+          style: const TextStyle(
             color: Colors.white,
             fontSize: 14,
             fontWeight: FontWeight.w600,

@@ -10,7 +10,10 @@ import '../core_bridge.dart';
 import '../local_store.dart';
 import '../theme_color.dart';
 import 'app_scope.dart';
+import 'cover_blur.dart';
+import 'device_registration.dart';
 import 'shell/app_shell.dart';
+import 'terms_page.dart';
 import 'theme/app_theme.dart';
 import 'theme/motion.dart';
 import 'theme/system_color.dart';
@@ -44,7 +47,8 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
   int? _profileEpoch;
   var _television = false;
   var _phone = false;
-  (Color, bool)? _themeKey;
+  (Color, bool, bool)? _themeKey;
+  CoverBlur? _coverBlur;
   late (ThemeData, ThemeData) _themes;
 
   @override
@@ -123,8 +127,7 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
 
   KeyEventResult _escape(KeyEvent event) {
     if (event is! KeyDownEvent ||
-        event.logicalKey != LogicalKeyboardKey.escape &&
-            event.logicalKey != LogicalKeyboardKey.goBack) {
+        event.logicalKey != LogicalKeyboardKey.escape) {
       return KeyEventResult.ignored;
     }
     final context =
@@ -179,16 +182,28 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
       unawaited(AppDevice.setTelevisionMode(television));
     }
     _television = television;
+    if (store != null) {
+      _coverBlur ??= store.blurCoversButton
+          ? CoverBlur.values.byName(store.blurCoversLaunch)
+          : CoverBlur.off;
+    }
+    final coverBlur = _coverBlur ?? CoverBlur.off;
     final systemColor = (store?.followSystemColor ?? true)
         ? _systemColor
         : null;
     final seed =
         systemColor ?? Color((store?.themeColor ?? ThemeColor.orange).seed);
-    if ((seed, television) != _themeKey) {
-      _themeKey = (seed, television);
+    final pureBlack = store?.pureBlack ?? false;
+    if ((seed, television, pureBlack) != _themeKey) {
+      _themeKey = (seed, television, pureBlack);
       _themes = (
         AppTheme.build(seed, Brightness.light, television: television),
-        AppTheme.build(seed, Brightness.dark, television: television),
+        AppTheme.build(
+          seed,
+          Brightness.dark,
+          television: television,
+          pureBlack: pureBlack,
+        ),
       );
     }
     WidgetsBinding.instance.addPostFrameCallback(
@@ -227,25 +242,35 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
               formFactor: formFactor,
               systemColorAvailable: _systemColor != null,
               version: widget.version,
-              child: Builder(
-                builder: (context) {
-                  final phone =
-                      AppScope.formFactorOf(context) == FormFactor.phone;
-                  if (phone != _phone) {
-                    _phone = phone;
-                    unawaited(AppDevice.setPhoneMode(phone));
-                  }
-                  return FocusOutlineMotion(
-                    child: FocusOutlineLayer(
-                      child: FocusTraversalGroup(
-                        policy: ReadingOrderTraversalPolicy(
-                          requestFocusCallback: revealFocus,
+              child: CoverBlurScope(
+                mode: coverBlur,
+                enabled: !television && (store?.blurCoversButton ?? false),
+                everywhere: store?.blurAllCovers ?? false,
+                onToggle: () => setState(
+                  () => _coverBlur = coverBlur == CoverBlur.off
+                      ? CoverBlur.all
+                      : CoverBlur.off,
+                ),
+                child: Builder(
+                  builder: (context) {
+                    final phone =
+                        AppScope.formFactorOf(context) == FormFactor.phone;
+                    if (phone != _phone) {
+                      _phone = phone;
+                      unawaited(AppDevice.setPhoneMode(phone));
+                    }
+                    return FocusOutlineMotion(
+                      child: FocusOutlineLayer(
+                        child: FocusTraversalGroup(
+                          policy: ReadingOrderTraversalPolicy(
+                            requestFocusCallback: revealFocus,
+                          ),
+                          child: child!,
                         ),
-                        child: child!,
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                ),
               ),
             ),
           ),
@@ -258,8 +283,12 @@ class _DuanjuAppState extends State<DuanjuApp> with WidgetsBindingObserver {
           error: widget.bootstrapError,
           onRetry: widget.onRetry,
         ),
+        LocalStore(acceptedTerms: < termsVersion) => TermsPage(store: store),
         LocalStore(locked: true) => UnlockPage(store: store),
-        _ => AppShell(key: ValueKey(store.profileEpoch), store: store),
+        _ => DeviceRegistrationGate(
+          store: store,
+          child: AppShell(key: ValueKey(store.profileEpoch), store: store),
+        ),
       },
     );
   }

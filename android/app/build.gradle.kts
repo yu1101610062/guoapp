@@ -12,8 +12,8 @@ val dartDefines = providers.gradleProperty("dart-defines").orNull.orEmpty()
         val decoded = String(Base64.getDecoder().decode(it), Charsets.UTF_8)
         decoded.substringBefore("=") to decoded.substringAfter("=", "")
     }
-val allSources = dartDefines["ALL_SOURCES"] == "true"
 val syncTest = dartDefines["SYNC_TEST_BUILD"] == "true"
+val appPackageName = System.getenv("PACKAGE_NAME")?.trim()?.takeIf { it.isNotEmpty() } ?: "com.duanju.duanju_app"
 
 val releaseKey = rootProject.file("key.properties")
 val releaseProperties = Properties()
@@ -30,7 +30,7 @@ if (releaseKey.exists()) {
 val hasReleaseKey = releaseProperties.getProperty("storeFile") != null
 
 android {
-    namespace = "com.duanju.duanju_app"
+    namespace = "com.guoapp"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "28.2.13676358"
 
@@ -40,15 +40,14 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.duanju.duanju_app"
+        applicationId = appPackageName
         if (syncTest) applicationIdSuffix = ".syncdev"
         minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        manifestPlaceholders["appLabel"] = if (allSources) "真果鉴" else "红果鉴"
-        if (syncTest) manifestPlaceholders["appLabel"] = "真果鉴（同步测试）"
-        manifestPlaceholders["appBanner"] = if (allSources) "@drawable/tv_banner_all_sources" else "@drawable/tv_banner"
+        manifestPlaceholders["appLabel"] = if (syncTest) "真果鉴（同步测试）" else "真果鉴"
+        manifestPlaceholders["appBanner"] = "@drawable/tv_banner"
     }
 
     signingConfigs {

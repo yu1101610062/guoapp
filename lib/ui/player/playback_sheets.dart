@@ -1,18 +1,25 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../playback_preferences.dart';
 import '../../playback_session.dart';
 import '../theme/app_theme.dart';
+import 'cast_page.dart';
+import 'danmaku_settings.dart';
+
+(Color, ThemeData)? _darkPlayerTheme;
 
 ThemeData playerTheme(BuildContext context) {
   final theme = Theme.of(context);
-  return theme.brightness == Brightness.dark
-      ? theme
-      : AppTheme.build(
-          theme.colorScheme.primary,
-          Brightness.dark,
-          television: false,
-        );
+  if (theme.brightness == Brightness.dark) return theme;
+  final seed = theme.colorScheme.primary;
+  if (_darkPlayerTheme case (final cached, final dark) when cached == seed) {
+    return dark;
+  }
+  final dark = AppTheme.build(seed, Brightness.dark, television: false);
+  _darkPlayerTheme = (seed, dark);
+  return dark;
 }
 
 Future<void> showPlayerSheet(
@@ -65,6 +72,49 @@ class PlaybackSettings extends StatelessWidget {
   final VoidCallback onFailure;
   final VoidCallback? onMiniWindow;
 
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      SheetHeader(
+        children: [
+          const Expanded(child: Text('播放设置', style: sheetTitle)),
+          IconButton(
+            onPressed: () => Navigator.pop(context),
+            icon: const Icon(Icons.close_rounded),
+            tooltip: '关闭',
+          ),
+        ],
+      ),
+      Expanded(
+        child: PlaybackSettingsList(
+          session: session,
+          onFailure: onFailure,
+          onMiniWindow: onMiniWindow,
+          onCast: () {
+            final navigator = Navigator.of(context);
+            navigator.pop();
+            unawaited(startCast(navigator.context, session));
+          },
+        ),
+      ),
+    ],
+  );
+}
+
+class PlaybackSettingsList extends StatelessWidget {
+  const PlaybackSettingsList({
+    super.key,
+    required this.session,
+    required this.onFailure,
+    this.onMiniWindow,
+    required this.onCast,
+  });
+  final PlaybackSession session;
+  final VoidCallback onFailure;
+  final VoidCallback? onMiniWindow;
+  final VoidCallback onCast;
+
   Future<void> _change(Future<void> Function() change) async {
     try {
       await change();
@@ -79,92 +129,163 @@ class PlaybackSettings extends StatelessWidget {
     builder: (context, _) {
       final colors = Theme.of(context).colorScheme;
       final label = TextStyle(fontSize: 14, color: colors.onSurfaceVariant);
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
-          SheetHeader(
+          Text('倍速', style: label),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
-              const Expanded(child: Text('播放设置', style: sheetTitle)),
-              IconButton(
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.close_rounded),
-                tooltip: '关闭',
-              ),
+              for (final speed in playbackSpeeds)
+                _Choice(
+                  label: '${speed}x',
+                  selected: speed == session.speed,
+                  onSelected: () => _change(() => session.setSpeed(speed)),
+                ),
             ],
           ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-              children: [
-                Text('倍速', style: label),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final speed in playbackSpeeds)
+          const SizedBox(height: 18),
+          Text('清晰度', style: label),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: session.local
+                ? [
+                    _Choice(
+                      label: session.qualityLabel,
+                      selected: true,
+                      onSelected: null,
+                    ),
+                  ]
+                : [
+                    for (final quality in [...session.qualities, 0])
                       _Choice(
-                        label: '${speed}x',
-                        selected: speed == session.speed,
-                        onSelected: () =>
-                            _change(() => session.setSpeed(speed)),
+                        label: quality == 0
+                            ? (session.quality == 0
+                                  ? session.qualityLabel
+                                  : '自动')
+                            : '${quality}P',
+                        selected: quality == session.quality,
+                        onSelected: session.ready
+                            ? () => _change(() => session.setQuality(quality))
+                            : null,
                       ),
                   ],
+          ),
+          const SizedBox(height: 18),
+          Text('画面比例', style: label),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final fit in VideoFit.values)
+                _Choice(
+                  label: fit.label,
+                  selected: fit == session.videoFit,
+                  onSelected: () => _change(() => session.setVideoFit(fit)),
                 ),
-                const SizedBox(height: 18),
-                Text('清晰度', style: label),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: session.local
-                      ? [
-                          _Choice(
-                            label: session.qualityLabel,
-                            selected: true,
-                            onSelected: null,
-                          ),
-                        ]
-                      : [
-                          for (final quality in [...session.qualities, 0])
-                            _Choice(
-                              label: quality == 0
-                                  ? (session.quality == 0
-                                        ? session.qualityLabel
-                                        : '自动')
-                                  : '${quality}P',
-                              selected: quality == session.quality,
-                              onSelected: session.ready
-                                  ? () => _change(
-                                      () => session.setQuality(quality),
-                                    )
-                                  : null,
-                            ),
-                        ],
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(sleepTimerLabel(session), style: label),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final choice in sleepChoices)
+                _Choice(
+                  label: choice.label,
+                  selected: choice.selected(session),
+                  onSelected: () => choice.apply(session),
                 ),
-                if (session.danmakuSupported) ...[
-                  const SizedBox(height: 8),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('弹幕'),
-                    value: session.danmakuEnabled,
-                    onChanged: (_) => _change(session.toggleDanmaku),
-                  ),
-                ],
-                if (onMiniWindow case final onMiniWindow?)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.picture_in_picture_alt_rounded),
-                    title: const Text('小窗播放'),
-                    onTap: onMiniWindow,
-                  ),
+            ],
+          ),
+          if (session.danmakuSupported) ...[
+            const SizedBox(height: 8),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('弹幕'),
+              value: session.danmakuEnabled,
+              onChanged: (_) => _change(session.toggleDanmaku),
+            ),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: const EdgeInsets.only(bottom: 8),
+              shape: const Border(),
+              collapsedShape: const Border(),
+              leading: const Icon(Icons.text_fields_rounded),
+              title: const Text('弹幕样式'),
+              subtitle: Text(
+                '字号、颜色、透明度与显示区域',
+                style: TextStyle(fontSize: 12, color: label.color),
+              ),
+              children: [
+                DanmakuSettings(
+                  session: session,
+                  onFailure: onFailure,
+                  dense: true,
+                ),
               ],
             ),
-          ),
+          ],
+          if (onMiniWindow case final onMiniWindow?)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.picture_in_picture_alt_rounded),
+              title: const Text('小窗播放'),
+              onTap: onMiniWindow,
+            ),
+          if (castSupported)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.cast_rounded),
+              title: const Text('投屏'),
+              onTap: onCast,
+            ),
         ],
       );
     },
   );
+}
+
+typedef SleepChoice = ({
+  String label,
+  bool Function(PlaybackSession) selected,
+  void Function(PlaybackSession) apply,
+});
+
+final List<SleepChoice> sleepChoices = [
+  (
+    label: '关闭',
+    selected: (session) =>
+        session.sleepMinutes == 0 && !session.sleepAtEpisodeEnd,
+    apply: (session) => session.setSleepTimer(),
+  ),
+  (
+    label: '播完本集',
+    selected: (session) => session.sleepAtEpisodeEnd,
+    apply: (session) => session.setSleepTimer(episodeEnd: true),
+  ),
+  for (final minutes in const [15, 30, 60, 90])
+    (
+      label: '$minutes 分钟',
+      selected: (session) => session.sleepMinutes == minutes,
+      apply: (session) => session.setSleepTimer(minutes: minutes),
+    ),
+];
+
+String sleepTimerLabel(PlaybackSession session) {
+  if (session.sleepAtEpisodeEnd) return '定时停止 · 本集播完后暂停';
+  final at = session.sleepAt;
+  if (at == null) return '定时停止';
+  final time =
+      '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+  return '定时停止 · $time 暂停';
 }
 
 class _Choice extends StatelessWidget {

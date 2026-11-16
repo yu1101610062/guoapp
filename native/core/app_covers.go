@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -83,39 +84,27 @@ func newNativeCoverCache(directory string, downloader *Downloader) *nativeCoverC
 }
 
 func nativeCoverReferer(downloader *Downloader, source, address string) string {
-	if source == sourceCloudFront {
-		if parsed, err := url.Parse(address); err == nil && (strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".zdmhyg.cn") || strings.EqualFold(parsed.Hostname(), "pic.tuafjz.cn")) {
-			return downloader.providerBaseURL(sourceHuangguoAI) + "/"
+	if p, ok := downloader.provider(source); ok {
+		if referer, ok := providerAs[CoverRefererProvider](p); ok {
+			return referer.CoverReferer(address)
 		}
-	}
-	if source == sourceHuangdou {
-		if parsed, err := url.Parse(address); err == nil && (strings.EqualFold(parsed.Hostname(), "tideember.cc") || strings.EqualFold(parsed.Hostname(), "xqjurgek.top")) {
-			return parsed.Scheme + "://" + parsed.Host + "/home"
-		}
-		downloader.providerMu.Lock()
-		host := downloader.providerHosts[source]
-		downloader.providerMu.Unlock()
-		if host == "" {
-			host = downloader.providerBaseURL(source)
-		}
-		return host + "/home"
 	}
 	return downloader.providerBaseURL(source) + "/"
 }
 
-func validNativeCoverURL(address *url.URL) bool {
+func ValidNativeCoverURL(address *url.URL) bool {
 	return address != nil && (address.Scheme == "https" || address.Scheme == "http") && address.Hostname() != "" && address.User == nil
 }
 
-func (cache *nativeCoverCache) loadAddress(ctx context.Context, drama nativeDrama, force bool) (string, error) {
-	drama.Cover = repairLegacyCoverURL(drama)
+func (cache *nativeCoverCache) loadAddress(ctx context.Context, drama LibraryDrama, force bool) (string, error) {
+	drama.Cover = cache.downloader.repairCover(drama)
 	address, err := url.Parse(drama.Cover)
-	if err != nil || !validNativeCoverURL(address) {
+	if err != nil || !ValidNativeCoverURL(address) {
 		return "", errors.New("海报地址无效")
 	}
 	source := canonicalProviderSource(drama.Source)
 	if source == "" {
-		source = sourceFromDramaID(drama.ID)
+		source = SourceFromDramaID(drama.ID)
 	}
 	referer := nativeCoverReferer(cache.downloader, source, drama.Cover)
 	digest := sha256.Sum256([]byte(source + "\x00" + drama.Cover + "\x00" + referer))
@@ -159,7 +148,7 @@ func (cache *nativeCoverCache) loadAddress(ctx context.Context, drama nativeDram
 	}
 }
 
-func (cache *nativeCoverCache) fetch(key string, drama nativeDrama, referer, fallback string, call *nativeCoverCall) {
+func (cache *nativeCoverCache) fetch(key string, drama LibraryDrama, referer, fallback string, call *nativeCoverCall) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	var data []byte
@@ -203,14 +192,14 @@ func (cache *nativeCoverCache) download(ctx context.Context, address, referer st
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("User-Agent", UserAgent)
 	request.Header.Set("Referer", referer)
 	request.Header.Set("Accept", "image/webp,image/jpeg,image/png,image/gif,*/*;q=0.5")
 	request.Header.Set("Sec-Fetch-Mode", "no-cors")
 	request.Header.Set("Sec-Fetch-Dest", "image")
 	client := *cache.downloader.client
 	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || !validNativeCoverURL(request.URL) {
+		if len(via) >= 5 || !ValidNativeCoverURL(request.URL) {
 			return errors.New("海报重定向地址无效")
 		}
 		request.Header.Set("Referer", referer)
@@ -245,6 +234,9 @@ func nativeDecodeCover(data []byte) []byte {
 	if nativeIsCoverImage(data) {
 		return data
 	}
+	if image, ok := nativeDecodeTextCover(data); ok {
+		return image
+	}
 	encrypted := data
 	if bytes.HasPrefix(encrypted, []byte("Salted__")) && len(encrypted) > 16 {
 		encrypted = encrypted[16:]
@@ -256,7 +248,7 @@ func nativeDecodeCover(data []byte) []byte {
 			copy(plain, encrypted)
 			cipher.NewCBCDecrypter(block, []byte("97b60394abc2fbe1")).CryptBlocks(plain, plain)
 			plain = plain[:len(encrypted)]
-			if unpadded, err := pkcs7Unpad(plain, aes.BlockSize); err == nil {
+			if unpadded, err := Pkcs7Unpad(plain, aes.BlockSize); err == nil {
 				plain = unpadded
 			}
 			if nativeIsCoverImage(plain) {
@@ -273,6 +265,45 @@ func nativeDecodeCover(data []byte) []byte {
 		return plain
 	}
 	return data
+}
+
+func nativeDecodeTextCover(data []byte) ([]byte, bool) {
+	if len(data) < 16 {
+		return nil, false
+	}
+	for index, char := range []byte("data:") {
+		if data[index]^18 != char {
+			return nil, false
+		}
+	}
+	decoded := append([]byte(nil), data...)
+	for index := 0; index < min(4096, len(decoded)); index++ {
+		decoded[index] ^= 18
+	}
+	text := string(decoded)
+	comma := strings.IndexByte(text, ',')
+	if comma < 0 {
+		return nil, false
+	}
+	header := strings.ToLower(text[:comma])
+	if !strings.HasPrefix(header, "data:image/") || !strings.HasSuffix(header, ";base64") {
+		return nil, false
+	}
+	payload := strings.Map(func(char rune) rune {
+		switch char {
+		case ' ', '\t', '\r', '\n':
+			return -1
+		}
+		return char
+	}, text[comma+1:])
+	image, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		image, err = base64.RawStdEncoding.DecodeString(payload)
+	}
+	if err != nil || !nativeIsCoverImage(image) {
+		return nil, false
+	}
+	return image, true
 }
 
 func nativeIsCoverImage(data []byte) bool {

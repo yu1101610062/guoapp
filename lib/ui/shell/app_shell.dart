@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../download_converter.dart';
+import '../../merge_queue.dart';
 import '../../download_overview.dart';
 import '../../follow_updater.dart';
 import '../../local_store.dart';
@@ -12,8 +13,10 @@ import '../app_scope.dart';
 import '../explore/explore_page.dart';
 import '../explore/source_actions.dart';
 import '../follow/follow_page.dart';
+import '../history/history_page.dart';
 import '../mine/mine_page.dart';
 import '../update_prompt.dart';
+import '../modules/module_install.dart';
 import '../widgets/bar_button.dart';
 import '../theme/motion.dart';
 import '../widgets/focus_ring.dart';
@@ -23,6 +26,7 @@ import '../widgets/source_bar.dart';
 enum AppTab {
   explore('发现', Icons.explore_outlined, Icons.explore),
   follow('追剧', Icons.bookmark_border_rounded, Icons.bookmark_rounded),
+  history('历史', Icons.history_rounded, Icons.history_rounded),
   mine('我的', Icons.person_outline_rounded, Icons.person_rounded);
 
   const AppTab(this.label, this.icon, this.selectedIcon);
@@ -40,6 +44,25 @@ Future<T?> openPage<T>(BuildContext context, WidgetBuilder builder) =>
       },
     ).push(MaterialPageRoute<T>(builder: builder));
 
+class ShellForeground extends InheritedWidget {
+  const ShellForeground({
+    super.key,
+    required this.foreground,
+    required super.child,
+  });
+  final bool foreground;
+
+  static bool of(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<ShellForeground>()
+          ?.foreground ??
+      true;
+
+  @override
+  bool updateShouldNotify(ShellForeground oldWidget) =>
+      foreground != oldWidget.foreground;
+}
+
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.store});
   final LocalStore store;
@@ -56,6 +79,7 @@ class _AppShellState extends State<AppShell> {
     for (final _ in AppTab.values) GlobalKey<NavigatorState>(),
   ];
   final _tabFocus = [for (final _ in AppTab.values) FocusNode()];
+  final _tabScrolls = [for (final _ in AppTab.values) ScrollController()];
   final _followEntry = FocusNode();
   final _mineEntry = FocusNode();
   final _header = FocusNode();
@@ -67,6 +91,7 @@ class _AppShellState extends State<AppShell> {
   Timer? _exitWindow;
   DownloadOverview? _downloads;
   DownloadConverter? _converter;
+  MergeQueue? _merges;
   FollowUpdater? _followUpdater;
 
   NavigatorState? get _navigator => _navigators[_tab.index].currentState;
@@ -76,7 +101,9 @@ class _AppShellState extends State<AppShell> {
     super.initState();
     FocusManager.instance.addListener(_followFocus);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) runStartupChecks(context, widget.store);
+      if (!mounted) return;
+      unawaited(offerRestoredModules(context, widget.store));
+      runStartupChecks(context, widget.store);
     });
   }
 
@@ -91,6 +118,8 @@ class _AppShellState extends State<AppShell> {
       AppScope.of(context).repository,
       _downloads!,
     );
+    _merges ??= MergeQueue(AppScope.of(context).repository)
+      ..onFinished = _mergeFinished;
     _followUpdater ??= FollowUpdater(
       AppScope.of(context).repository,
       widget.store,
@@ -103,6 +132,9 @@ class _AppShellState extends State<AppShell> {
     for (final node in _tabFocus) {
       node.dispose();
     }
+    for (final scroll in _tabScrolls) {
+      scroll.dispose();
+    }
     for (final hero in _heroes) {
       hero.dispose();
     }
@@ -111,12 +143,55 @@ class _AppShellState extends State<AppShell> {
     _header.dispose();
     _exitWindow?.cancel();
     _converter?.dispose();
+    _merges?.dispose();
     _downloads?.dispose();
     _followUpdater?.dispose();
     super.dispose();
   }
 
+  List<AppTab> get _tabs => [
+    for (final tab in AppTab.values)
+      if (switch (tab) {
+        AppTab.history =>
+          widget.store.historyTab && !AppScope.of(context).television,
+        AppTab.explore || AppTab.follow || AppTab.mine => true,
+      })
+        tab,
+  ];
+
   void _select(AppTab tab) => setState(() => _tab = tab);
+
+  void _tap(AppTab tab) {
+    if (tab != _tab) return _select(tab);
+    final navigator = _navigator;
+    if (navigator != null && navigator.canPop()) {
+      return navigator.popUntil((route) => route.isFirst);
+    }
+    if (tab == AppTab.explore) return _explore.currentState?.reselect();
+    for (final position in _tabScrolls[tab.index].positions) {
+      if (position.pixels <= position.minScrollExtent) continue;
+      unawaited(
+        position.animateTo(
+          position.minScrollExtent,
+          duration: Motion.of(context, Motion.long),
+          curve: Motion.enter,
+        ),
+      );
+    }
+  }
+
+  void _mergeFinished(MergeTask task) {
+    if (task.state == MergeState.cancelled) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(
+        content: Text(
+          task.state == MergeState.done
+              ? '「${task.fileName}」${task.message}'
+              : '「${task.fileName}」合并失败：${task.message}',
+        ),
+      ),
+    );
+  }
 
   void _followFocus() {
     final previous = _lastFocus;
@@ -165,10 +240,12 @@ class _AppShellState extends State<AppShell> {
       entryFocus: _followEntry,
       onExitUp: _tabFocus[AppTab.follow.index].requestFocus,
     ),
+    AppTab.history => HistoryPage(store: widget.store, root: true),
     AppTab.mine => MinePage(
       store: widget.store,
       downloads: _downloads!,
       converter: _converter!,
+      merges: _merges!,
       entryFocus: _mineEntry,
       onExitUp: _tabFocus[AppTab.mine.index].requestFocus,
     ),
@@ -176,7 +253,7 @@ class _AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = NotificationListener<NavigationNotification>(
+    final stack = NotificationListener<NavigationNotification>(
       onNotification: (_) {
         setState(() {});
         return false;
@@ -195,7 +272,12 @@ class _AppShellState extends State<AppShell> {
                   routeDirectionalTraversalEdgeBehavior:
                       TraversalEdgeBehavior.parentScope,
                   onGenerateInitialRoutes: (_, _) => [
-                    MaterialPageRoute<void>(builder: (_) => _root(tab)),
+                    MaterialPageRoute<void>(
+                      builder: (_) => PrimaryScrollController(
+                        controller: _tabScrolls[tab.index],
+                        child: _root(tab),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -203,7 +285,13 @@ class _AppShellState extends State<AppShell> {
         ],
       ),
     );
+    final pages = ShellForeground(
+      foreground: ModalRoute.of(context)?.isCurrent ?? true,
+      child: stack,
+    );
     final television = AppScope.of(context).television;
+    final tabs = _tabs;
+    if (!tabs.contains(_tab)) _tab = AppTab.explore;
     final covered = _navigator?.canPop() ?? false;
     return PopScope(
       canPop:
@@ -220,11 +308,10 @@ class _AppShellState extends State<AppShell> {
           bottomNavigationBar: covered
               ? null
               : NavigationBar(
-                  selectedIndex: _tab.index,
-                  onDestinationSelected: (index) =>
-                      _select(AppTab.values[index]),
+                  selectedIndex: tabs.indexOf(_tab),
+                  onDestinationSelected: (index) => _tap(tabs[index]),
                   destinations: [
-                    for (final tab in AppTab.values)
+                    for (final tab in tabs)
                       NavigationDestination(
                         key: ValueKey('nav-${tab.name}'),
                         icon: _badged(tab, Icon(tab.icon)),
@@ -257,7 +344,7 @@ class _AppShellState extends State<AppShell> {
                         final entry = switch (_tab) {
                           AppTab.follow => _followEntry,
                           AppTab.mine => _mineEntry,
-                          AppTab.explore => null,
+                          AppTab.explore || AppTab.history => null,
                         };
                         if (event is KeyUpEvent ||
                             event.logicalKey != LogicalKeyboardKey.arrowDown ||
@@ -288,7 +375,7 @@ class _AppShellState extends State<AppShell> {
       key: _televisionTabs,
       spacing: 6,
       children: [
-        for (final tab in AppTab.values)
+        for (final tab in _tabs)
           _TelevisionTab(
             tab: tab,
             selected: tab == _tab,
@@ -319,10 +406,11 @@ class _AppShellState extends State<AppShell> {
       body: Row(
         children: [
           _SideBar(
+            tabs: _tabs,
             selected: _tab,
             expanded: expanded,
             badged: _badged,
-            onSelect: _select,
+            onSelect: _tap,
             onToggle: roomy
                 ? () => widget.store.setSideBarExpanded(!expanded)
                 : null,
@@ -399,12 +487,14 @@ class _TabFade extends StatelessWidget {
 
 class _SideBar extends StatefulWidget {
   const _SideBar({
+    required this.tabs,
     required this.selected,
     required this.expanded,
     required this.badged,
     required this.onSelect,
     this.onToggle,
   });
+  final List<AppTab> tabs;
   final AppTab selected;
   final bool expanded;
   final Widget Function(AppTab tab, Widget icon) badged;
@@ -470,7 +560,7 @@ class _SideBarState extends State<_SideBar> {
                     ),
                   ),
                 ),
-                for (final tab in AppTab.values)
+                for (final tab in widget.tabs)
                   _SideItem(
                     tab: tab,
                     selected: tab == widget.selected,

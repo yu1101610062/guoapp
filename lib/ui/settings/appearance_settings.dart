@@ -61,6 +61,14 @@ class AppearanceSettings extends StatelessWidget {
               },
             ),
             const Divider(indent: 16, endIndent: 16),
+            SwitchTile(
+              title: '纯黑深色模式',
+              subtitle: '深色时背景改为纯黑，适合 OLED 屏幕',
+              value: store.pureBlack,
+              onChanged: (value) =>
+                  saveSetting(context, () => store.setPureBlack(value)),
+            ),
+            const Divider(indent: 16, endIndent: 16),
             TileFocus(
               builder: (focusNode) => SwitchListTile(
                 focusNode: focusNode,
@@ -127,6 +135,77 @@ class AppearanceSettings extends StatelessWidget {
         ),
         GroupCard(
           children: [
+            if (!AppScope.of(context).television) ...[
+              SwitchTile(
+                title: '在主页底栏显示历史',
+                subtitle: '关闭后仍可在「我的」里打开观看记录',
+                value: store.historyTab,
+                onChanged: (value) =>
+                    saveSetting(context, () => store.setHistoryTab(value)),
+              ),
+              const Divider(indent: 16, endIndent: 16),
+              SwitchTile(
+                title: '在主页显示模糊封面按钮',
+                subtitle: '发现页站源按钮左边显示眼睛按钮，点一下模糊封面，再点恢复',
+                value: store.blurCoversButton,
+                onChanged: (value) => saveSetting(
+                  context,
+                  () => store.setBlurCoversButton(value),
+                ),
+              ),
+              const Divider(indent: 16, endIndent: 16),
+              SwitchTile(
+                title: '模糊所有界面的封面',
+                subtitle: store.blurCoversButton
+                    ? '关闭后只模糊发现页的封面'
+                    : '需先打开在主页显示模糊封面按钮',
+                value: store.blurCoversButton && store.blurAllCovers,
+                onChanged: store.blurCoversButton
+                    ? (value) => saveSetting(
+                        context,
+                        () => store.setBlurAllCovers(value),
+                      )
+                    : null,
+              ),
+              const Divider(indent: 16, endIndent: 16),
+              SettingsTile(
+                title: '开屏自动模糊封面',
+                subtitle: store.blurCoversButton
+                    ? coverBlurLaunchModes[store.blurCoversLaunch]!
+                    : '需先打开在主页显示模糊封面按钮',
+                enabled: store.blurCoversButton,
+                onTap: store.blurCoversButton
+                    ? () async {
+                        final selection = await showOptionDialog(
+                          context,
+                          title: '开屏自动模糊封面',
+                          options: coverBlurLaunchModes,
+                          selected: store.blurCoversLaunch,
+                        );
+                        if (selection != null && context.mounted) {
+                          await saveSetting(
+                            context,
+                            () => store.setBlurCoversLaunch(selection),
+                          );
+                        }
+                      }
+                    : null,
+              ),
+            ],
+            if (AppScope.of(context).television)
+              SwitchTile(
+                title: '搜索用字母键盘',
+                subtitle: '开启后按确认键弹出字母键盘，可按拼音首字母搜；关闭时使用系统输入法',
+                value: store.televisionKeyboard,
+                onChanged: (value) => saveSetting(
+                  context,
+                  () => store.setTelevisionKeyboard(value),
+                ),
+              ),
+          ],
+        ),
+        GroupCard(
+          children: [
             SettingsTile(
               title: '界面模式',
               subtitle: displayModes[platformDisplayMode(store.displayMode)]!,
@@ -145,18 +224,6 @@ class AppearanceSettings extends StatelessWidget {
                 }
               },
             ),
-            if (AppScope.of(context).television) ...[
-              const Divider(indent: 16, endIndent: 16),
-              SwitchTile(
-                title: '搜索用字母键盘',
-                subtitle: '开启后按确认键弹出字母键盘，可按拼音首字母搜；关闭时使用系统输入法',
-                value: store.televisionKeyboard,
-                onChanged: (value) => saveSetting(
-                  context,
-                  () => store.setTelevisionKeyboard(value),
-                ),
-              ),
-            ],
           ],
         ),
       ],

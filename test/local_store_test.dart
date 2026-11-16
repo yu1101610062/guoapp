@@ -6,17 +6,26 @@ import 'package:duanju_app/local_files.dart';
 import 'package:duanju_app/local_profiles.dart';
 import 'package:duanju_app/local_snapshot.dart';
 import 'package:duanju_app/local_store.dart';
+import 'package:duanju_app/models.dart';
 import 'package:duanju_app/playback_preferences.dart';
 import 'package:duanju_app/theme_color.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
 
 import 'support/fakes.dart';
+import 'support/source_fixture.dart';
 
 class _FailingFiles extends LocalFiles {
   _FailingFiles(super.root);
   String failure = '';
   int writes = 0;
+  bool unreadable = false;
+
+  @override
+  Future<List<int>> load(File file) {
+    if (unreadable) throw const FileSystemException('读取失败');
+    return super.load(file);
+  }
 
   @override
   Future<void> persist(File file, String content) async {
@@ -156,7 +165,7 @@ void main() {
       expect(store.themeMode, 'system');
       expect(store.themeColor, ThemeColor.orange);
       expect(store.sourceEnabled('hongguo'), isTrue);
-      expect(store.sourceEnabled('huangdou'), isFalse);
+      expect(store.sourceEnabled('huangdou'), isTrue);
     });
 
     for (final (name, records) in [
@@ -238,6 +247,28 @@ void main() {
 
       final restarted = await restartStore(store);
       expect(restarted.watched(first.id)?.position, 15);
+    });
+
+    test('records that cannot be opened are kept and load later', () async {
+      final files = _FailingFiles(temporaryFiles().root);
+      final store = await openStore(const {}, null, files);
+      await store.toggleFavorite(first);
+      await store.saveWatch(watching(first, position: 15));
+
+      files.unreadable = true;
+      final restarted = await restartStore(store);
+      expect(restarted.configurationError, isNotNull);
+      expect(restarted.history, isEmpty);
+      expect(
+        _file(store, 'users/default/history.json.corrupt').existsSync(),
+        isFalse,
+      );
+
+      files.unreadable = false;
+      await restarted.reload();
+      expect(restarted.configurationError, isNull);
+      expect(restarted.watched(first.id)?.position, 15);
+      expect(restarted.favorites.single.id, first.id);
     });
 
     test('a broken users file locks access', () async {
@@ -391,6 +422,38 @@ void main() {
       expect(restarted.preferences.getString('plugin_secret'), 'stays-local');
     });
 
+    test('source switches survive a round trip', () async {
+      installSourceFixture();
+      final store = await _open();
+      await store.setSourceEnabled('hongguo', false);
+      final backup = jsonDecode(await store.exportBackup()) as Map;
+      expect(backup['sourceSwitches'], {'hongguo': false});
+
+      await store.setSourceEnabled('hongguo', true);
+      await store.importBackup(jsonEncode(backup));
+
+      final restarted = await restartStore(store);
+      expect(restarted.sourceEnabled('hongguo'), isFalse);
+    });
+
+    test('the backed up module list is offered once after a restore', () async {
+      final store = await _open();
+      final backup =
+          jsonDecode(
+                await store.exportBackup(
+                  modules: const ['hongguo', '../x', 'hongguo', 'guipian'],
+                ),
+              )
+              as Map;
+      expect(backup['modules'], ['hongguo', 'guipian']);
+      expect(store.takeRestoredModules(), isEmpty);
+
+      await store.importBackup(jsonEncode(backup));
+
+      expect(store.takeRestoredModules(), ['hongguo', 'guipian']);
+      expect(store.takeRestoredModules(), isEmpty);
+    });
+
     test('older backups without newer fields still import', () async {
       final store = await _open();
       await store.toggleFavorite(first);
@@ -423,6 +486,36 @@ void main() {
       );
     });
 
+    test(
+      'cover blur settings restore and older launch flags migrate',
+      () async {
+        final store = await _open();
+        expect(store.blurCoversLaunch, 'off');
+        expect(store.blurAllCovers, isTrue);
+        await store.setBlurCoversLaunch('adult');
+        await store.setBlurAllCovers(false);
+        final backup = jsonDecode(await store.exportBackup()) as Map;
+
+        await store.setBlurCoversLaunch('off');
+        await store.setBlurAllCovers(true);
+        await store.importBackup(jsonEncode(backup));
+        expect(store.blurCoversLaunch, 'adult');
+        expect(store.blurAllCovers, isFalse);
+
+        backup
+          ..remove('blurCoversLaunch')
+          ..['blurCoversOnLaunch'] = true;
+        await store.importBackup(jsonEncode(backup));
+        expect(store.blurCoversLaunch, 'all');
+
+        backup['blurCoversLaunch'] = 'blurry';
+        await expectLater(
+          store.importBackup(jsonEncode(backup)),
+          throwsFormatException,
+        );
+      },
+    );
+
     test('device link records from older versions are ignored', () async {
       final store = await _open();
       await store.toggleFavorite(first);
@@ -447,6 +540,11 @@ void main() {
       ('an unknown theme mode', (data) => data['themeMode'] = 'sepia'),
       ('an unknown theme color', (data) => data['themeColor'] = 'gold'),
       ('a non-boolean setting', (data) => data['checkUpdates'] = 'yes'),
+      ('a malformed module list', (data) => data['modules'] = ['../x']),
+      (
+        'a non-boolean source switch',
+        (data) => data['sourceSwitches'] = {'hongguo': 'off'},
+      ),
       (
         'a profile id with a path',
         (data) => (data['profiles'] as List).add({
@@ -577,5 +675,72 @@ void main() {
         expect((await restartStore(store)).history.single.drama.id, second.id);
       },
     );
+
+    test('quiet saves only notify when the visible history changes', () async {
+      final store = await _open();
+      var notified = 0;
+      store.addListener(() => notified++);
+      var minute = 0;
+      Future<void> save(Drama item, {int episode = 1, bool quiet = true}) =>
+          store.saveWatch(
+            WatchEntry(
+              drama: item,
+              episode: episode,
+              position: 10.0 + minute,
+              duration: 100,
+              updatedAt: DateTime(2026, 10, 20, 0, minute++),
+            ),
+            quiet: quiet,
+          );
+
+      await save(first);
+      expect(notified, 1);
+      await save(first);
+      expect(notified, 1);
+      expect(store.watched(first.id)?.position, 11);
+      await save(first, episode: 2);
+      expect(notified, 2);
+      await save(second);
+      expect(notified, 3);
+      await save(first, episode: 2);
+      expect(notified, 4);
+      await save(first, episode: 2, quiet: false);
+      expect(notified, 5);
+      expect((await restartStore(store)).watched(first.id)?.position, 15);
+    });
+  });
+
+  test('a recent search can be forgotten on its own', () async {
+    final store = await _open();
+    for (final query in ['甲', '乙', '丙']) {
+      await store.rememberSearch(query);
+    }
+    await store.forgetSearch('乙');
+    expect(store.recentSearches, ['丙', '甲']);
+    final restarted = await restartStore(store);
+    expect(restarted.recentSearches, ['丙', '甲']);
+  });
+
+  test('erasing all data clears preferences and blocks later writes', () async {
+    final store = await _open({'plugin_secret': 'gone'});
+    final leftover = await store.eraseAll(() async {
+      await store.files.root.delete(recursive: true);
+      return ['locked.log'];
+    });
+    expect(leftover, ['locked.log']);
+    expect(store.preferences.getKeys(), isEmpty);
+    await store.setCheckUpdates(false);
+    expect(store.files.root.existsSync(), isFalse);
+  });
+
+  test('failed data erasure restores local access', () async {
+    final store = await _open();
+    await expectLater(
+      store.eraseAll(() async => throw StateError('failed')),
+      throwsStateError,
+    );
+    expect(store.locked, isFalse);
+    await store.rememberSearch('仍可使用');
+    expect(store.recentSearches, ['仍可使用']);
   });
 }

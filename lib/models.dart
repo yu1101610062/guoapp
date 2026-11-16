@@ -1,64 +1,85 @@
 import 'dart:convert';
 
-import 'app_build.dart';
+const hongguoSourceId = 'hongguo';
+
+bool validSourceId(String id) => RegExp(r'^[a-z0-9_-]{1,64}$').hasMatch(id);
 
 class SourceSite {
-  const SourceSite(this.id, this.name, this.description);
+  const SourceSite(
+    this.id,
+    this.name,
+    this.description, {
+    this.group = '',
+    this.groupLabel = '',
+    this.entryLabel = '',
+    this.available = true,
+    this.pagedSearch = false,
+    this.searchSuggestions = false,
+    this.recommends = false,
+    this.danmaku = false,
+    this.devices = false,
+    this.account = false,
+    this.metadata = false,
+    this.adult = false,
+    this.vipPrompt = true,
+  });
+  factory SourceSite.fromJson(Map<String, dynamic> json) => SourceSite(
+    json['id'] as String? ?? '',
+    json['name'] as String? ?? '',
+    json['description'] as String? ?? '',
+    group: json['group'] as String? ?? '',
+    groupLabel: json['groupName'] as String? ?? '',
+    entryLabel: json['entryName'] as String? ?? '',
+    available: json['available'] == true,
+    pagedSearch: json['search'] == true,
+    searchSuggestions: json['suggestions'] == true,
+    recommends: json['recommendations'] == true,
+    danmaku: json['danmaku'] == true,
+    devices: json['devices'] == true,
+    account: json['account'] == true,
+    metadata: json['metadata'] == true,
+    adult: json['adult'] == true,
+    vipPrompt: json['vipPrompt'] != false,
+  );
   final String id;
   final String name;
   final String description;
+  final String group;
+  final String groupLabel;
+  final String entryLabel;
+  final bool available;
+  final bool pagedSearch;
+  final bool searchSuggestions;
+  final bool recommends;
+  final bool danmaku;
+  final bool devices;
+  final bool account;
+  final bool metadata;
+  final bool adult;
+  final bool vipPrompt;
   bool get onlineSearch => pagedSearch;
-  bool get pagedSearch =>
-      id == 'hongguo' ||
-      id == 'huangju' ||
-      id == 'yeguo' ||
-      id == 'dsd' ||
-      id == 'sorani' ||
-      id == 'guipian' ||
-      id == 'hanxiaoquan';
-  bool get searchSuggestions => id == 'hongguo';
-  String get groupId => switch (id) {
-    'huangguo-video' || 'huangguoai' || 'cloudfront' => 'huangguo',
-    _ => id,
-  };
-  String get groupName => groupId == 'huangguo' ? '黄果' : name;
-  String get entryName => switch (id) {
-    'huangguo-video' => '视频',
-    'huangguoai' => 'AI',
-    'cloudfront' => '旧版',
-    _ => name,
-  };
+  String get groupId => group.isEmpty ? id : group;
+  String get groupName => groupLabel.isEmpty ? name : groupLabel;
+  String get entryName => entryLabel.isEmpty ? name : entryLabel;
 
-  static const hongguo = SourceSite('hongguo', '红果', '短剧 · 漫剧 · AI 剧');
-  static const dsd = SourceSite('dsd', '帝果', '分类视频 · 在线搜索');
-  static const sorani = SourceSite('sorani', '青空', '番剧 · 剧场动画 · 特摄');
-  static const guipian = SourceSite('guipian', '鬼片', '鬼片 · 电视剧 · 动漫');
-  static const hanxiaoquan = SourceSite(
-    'hanxiaoquan',
-    '韩小圈',
-    '韩剧 · 韩国电影 · 综艺动漫',
+  static List<SourceSite> _all = const [];
+  static List<SourceSite> _available = const [];
+
+  static void install(Iterable<SourceSite> sites) {
+    _all = List.unmodifiable(sites.where((site) => site.id.isNotEmpty));
+    _available = List.unmodifiable(_all.where((site) => site.available));
+  }
+
+  static List<SourceSite> get allValues => _all;
+  static List<SourceSite> get values => _available;
+  static bool isAvailable(String id) => _available.any((site) => site.id == id);
+  static bool isKnown(String id) => _all.any((site) => site.id == id);
+  static bool isAdult(String id) =>
+      _all.any((site) => site.id == id && site.adult);
+  static SourceSite byId(String id) => _all.firstWhere(
+    (site) => site.id == id,
+    orElse: () => SourceSite(id, id, '', available: false),
   );
-
-  static const primaryValues = [hongguo, hanxiaoquan, guipian, sorani];
-
-  static const restrictedValues = [
-    SourceSite('huangdou', '黄豆', '精选短剧'),
-    SourceSite('huangju', '剧果', '热门 · 最新 · 分类短剧'),
-    SourceSite('yeguo', '野果', '分类短剧 · 在线搜索'),
-    dsd,
-    SourceSite('huangguo-video', '黄果视频', '视频剧集'),
-    SourceSite('huangguoai', '黄果 AI', 'AI 短剧'),
-    SourceSite('cloudfront', '黄果旧版', '旧 API 剧库'),
-  ];
-  static const knownValues = [...primaryValues, ...restrictedValues];
-  static const allValues = [...primaryValues, ...restrictedValues];
-  static const values = allSourcesEnabled ? knownValues : [hongguo];
-  static bool isAvailable(String id) => values.any((site) => site.id == id);
-  static bool isKnown(String id) => allValues.any((site) => site.id == id);
-  static bool isRestricted(String id) =>
-      restrictedValues.any((site) => site.id == id);
-  static SourceSite byId(String id) =>
-      allValues.firstWhere((site) => site.id == id, orElse: () => hongguo);
 }
 
 class SourceGroup {
@@ -109,8 +130,10 @@ class Drama {
     this.heat = '',
     this.views = '',
     this.onlineDate = '',
+    this.score = '',
     this.tags = const [],
     this.releaseStatus = '',
+    this.badge = '',
   }) : vipStatus = vip;
   final String id;
   final String source;
@@ -125,8 +148,10 @@ class Drama {
   final String heat;
   final String views;
   final String onlineDate;
+  final String score;
   final List<String> tags;
   final String releaseStatus;
+  final String badge;
   String get releaseLabel => switch (releaseStatus) {
     'finished' || 'completed' => '已完结',
     'ongoing' => '连载中',
@@ -152,8 +177,10 @@ class Drama {
     heat: json['heat']?.toString() ?? '',
     views: json['views']?.toString() ?? '',
     onlineDate: json['onlineDate'] as String? ?? '',
+    score: json['score'] as String? ?? '',
     tags: (json['tags'] as List? ?? const []).whereType<String>().toList(),
     releaseStatus: json['releaseStatus'] as String? ?? '',
+    badge: json['badge'] as String? ?? '',
   );
   Map<String, dynamic> toJson() => {
     'metadataSchema': 1,
@@ -169,8 +196,10 @@ class Drama {
     'heat': heat,
     'views': views,
     'onlineDate': onlineDate,
+    'score': score,
     'tags': tags,
     'releaseStatus': releaseStatus,
+    'badge': badge,
   };
 
   Drama merge(Drama fresh) {
@@ -205,11 +234,13 @@ class Drama {
       heat: fresh.heat.isEmpty ? heat : fresh.heat,
       views: fresh.views.isEmpty ? views : fresh.views,
       onlineDate: fresh.onlineDate.isEmpty ? onlineDate : fresh.onlineDate,
+      score: fresh.score.isEmpty ? score : fresh.score,
       tags: fresh.tags.isEmpty ? tags : fresh.tags,
       releaseStatus:
           fresh.releaseStatus.isEmpty || fresh.releaseStatus == 'unknown'
           ? releaseStatus
           : fresh.releaseStatus,
+      badge: fresh.badge.isEmpty ? badge : fresh.badge,
     );
   }
 }
@@ -232,10 +263,22 @@ class Episode {
 }
 
 class DramaDetail {
-  DramaDetail(this.drama, this.episodes, {this.warning = ''});
+  DramaDetail(
+    this.drama,
+    this.episodes, {
+    this.warning = '',
+    this.seasons = const [],
+  });
   final Drama drama;
   final List<Episode> episodes;
   final String warning;
+  final List<DramaSeason> seasons;
+
+  DramaSeason? get nextSeason {
+    final index = seasons.indexWhere((season) => season.drama.id == drama.id);
+    return index < 0 || index + 1 >= seasons.length ? null : seasons[index + 1];
+  }
+
   factory DramaDetail.fromJson(Map<String, dynamic> json) {
     final rows = json['chapters'] as List? ?? const [];
     return DramaDetail(
@@ -247,6 +290,34 @@ class DramaDetail {
       warning: json['warning'] as String? ?? '',
     );
   }
+}
+
+class DramaSeason {
+  const DramaSeason({required this.number, required this.drama});
+  final int number;
+  final Drama drama;
+
+  String get label => '第$number季';
+
+  bool get upcoming {
+    final date = DateTime.tryParse(drama.onlineDate);
+    if (date == null) return drama.episodes == 0;
+    final now = DateTime.now();
+    return date.isAfter(DateTime(now.year, now.month, now.day));
+  }
+
+  String? get onlineLabel {
+    final date = DateTime.tryParse(drama.onlineDate);
+    if (date == null) return null;
+    String two(int value) => value.toString().padLeft(2, '0');
+    final day = '${two(date.month)}-${two(date.day)}';
+    return upcoming ? '$day 待上线' : '$day 上线';
+  }
+
+  factory DramaSeason.fromJson(Map<String, dynamic> json) => DramaSeason(
+    number: json['number'] as int? ?? 0,
+    drama: Drama.fromJson(Map<String, dynamic>.from(json['drama'] as Map)),
+  );
 }
 
 class CatalogPage {
@@ -426,6 +497,8 @@ class DownloadJob {
 }
 
 typedef DownloadConversion = ({String input, String key, String output});
+typedef CastDevice = ({String id, String name});
+typedef CastStatus = ({String state, double position, double duration});
 
 List<Map<String, dynamic>> readJsonList(String? value) {
   try {

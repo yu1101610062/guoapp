@@ -2,7 +2,7 @@
 
 ## 使用
 
-首批目标为 Windows 和 Android 手机/平板，必须同时构建 Flutter 和 Go 的全站源版本。当前正式版本为 `1.0.4+105`，修复平板/窗口布局中弹出软键盘后设置表单变空的问题；不传 `--sync-test` 时，Android 应用 ID 保持 `com.duanju.duanju_app`，名称为“真果鉴”，使用原数据目录、偏好前缀和原生核心配置。
+当前分支已合并上游 2.0.1，版本为 `2.0.1+114`（开发快照）。首批目标仍为 Windows 和 Android 手机/平板，2.x 改为运行时站源模块，`--all-sources` 仅保留为旧命令兼容参数。Android 应用 ID 保持 `com.duanju.duanju_app`，名称为“真果鉴”，沿用原数据目录、偏好前缀和原生核心配置；Windows 默认沿用原真果鉴存档目录。其他站源在「我的 → 模块」安装，旧记录不会因模块暂缺而删除。2.x 的构建与验收边界见 [验证记录](upstream-2x-validation.md)。
 
 此前的独立测试版为 `1.0.3-sync.1+103`：Android 应用 ID 是 `com.duanju.duanju_app.syncdev`，名称为“真果鉴（同步测试）”；Windows 测试数据位于 `sync-test-v1/`，偏好、原生核心和下载目录也独立。测试版的云端绑定不会自动复制到正式版，正式版需为相应本地用户连接云端资料并确认合并。
 
@@ -79,9 +79,11 @@ ZhenguojianSync/v1/
 
 ## 构建与复验
 
-正常全站源构建：
+正常构建（先下载官方红果模块；其他站源运行时安装）：
 
 ```powershell
+git clone https://github.com/guoapp-modules/hongguo.git bundled-modules/hongguo
+$env:BUNDLED_MODULES = 'bundled-modules/hongguo'
 python scripts/build_windows.py --all-sources
 python scripts/build_android.py --all-sources
 ```
@@ -96,10 +98,10 @@ python scripts/build_android.py --all-sources --sync-test
 flutter test --no-pub --dart-define=ALL_SOURCES=true
 dart analyze lib test
 # 在 native 目录执行：
-go test -ldflags='-X duanjuapp/native/core.buildAllSources=true' ./...
+go test ./...
 ```
 
-环境：Flutter 3.44.1 / Dart 3.12.1、JDK 21、Android NDK 28.2.13676358、Visual Studio 2026、MinGW GCC 15.2。当前 Flutter SDK 对锁文件中的部分更新依赖进行了兼容解析，已更新并保留 `pubspec.lock`。Windows 构建工具在中文路径下出现 `app.dill` 路径编码错误，因此本次用英文暂存目录构建，再把产物交回项目目录。插件目录使用本地 NTFS junction，无需修改 Windows 开发者模式。
+本次环境：Flutter 3.47.9 / Dart 3.13.7、Go 1.26.0、JDK 25（Gradle 自动选取）、Android NDK 28.2.13676358、Visual Studio 2026、MinGW GCC 15.2。请使用 Flutter 3.47.9；2.x 使用 AGP 9 的内置 Kotlin 支持，旧 Flutter 3.44 工具链无法完成 Android 构建。依赖锁文件已随本分支更新。Windows 构建工具在中文路径下出现 `app.dill` 路径编码错误，因此本次用英文暂存目录构建，再把产物交回项目目录。插件目录使用本地 NTFS junction，无需修改 Windows 开发者模式。
 
 测试 APK 使用本机 debug 签名。正式 Android 构建使用维护者自己的固定签名密钥；构建脚本支持 `ANDROID_KEYSTORE_PATH`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 环境变量，或本地 `android/key.properties`。密钥和密码不提交 Git。后续升级必须继续使用同一签名。
 
