@@ -153,6 +153,7 @@ class _SettingsPageState extends State<SettingsPage> {
       ].join(' · '),
       SettingsGroup.playback => '倍速、清晰度、解码与手势',
       SettingsGroup.danmaku => '字号、颜色、显示区域与屏蔽词',
+      SettingsGroup.slacking => Platform.isWindows ? '老板键、小窗贴边隐藏' : '老板键',
       SettingsGroup.download =>
         Platform.isAndroid ? '默认画质、同时下载数量、自动导出' : '默认画质、VIP 集、同时下载数量',
       SettingsGroup.storage => '下载目录、清理缓存、删除全部数据',
@@ -255,12 +256,13 @@ class _SettingsPageState extends State<SettingsPage> {
           GroupCard(
             children: [
               for (final group in SettingsGroup.values)
-                SettingsTile(
-                  icon: group.icon,
-                  title: group.label,
-                  subtitle: _summary(group),
-                  onTap: () => _openGroup(group),
-                ),
+                if (group.visible)
+                  SettingsTile(
+                    icon: group.icon,
+                    title: group.label,
+                    subtitle: _summary(group),
+                    onTap: () => _openGroup(group),
+                  ),
             ],
           ),
         ],
@@ -379,18 +381,19 @@ class _SettingsPageState extends State<SettingsPage> {
 
   List<Widget> _groupItems(bool television) => [
     for (final group in SettingsGroup.values)
-      Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: _GroupItem(
-          key: ValueKey('settings-${group.name}'),
-          label: group.label,
-          selected: group == _group,
-          focusNode: _groupFocus[group.index],
-          autofocus: television && group == _group,
-          onTap: () => _select(group),
-          onFocus: television ? () => _select(group) : null,
+      if (group.visible)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: SettingsGroupItem(
+            key: ValueKey('settings-${group.name}'),
+            label: group.label,
+            selected: group == _group,
+            focusNode: _groupFocus[group.index],
+            autofocus: television && group == _group,
+            onTap: () => _select(group),
+            onFocus: television ? () => _select(group) : null,
+          ),
         ),
-      ),
   ];
 
   Widget _detail(bool television) {
@@ -547,56 +550,4 @@ class _DetailHeader extends StatelessWidget {
       ),
     ),
   );
-}
-
-class _GroupItem extends StatelessWidget {
-  const _GroupItem({
-    super.key,
-    required this.label,
-    required this.selected,
-    required this.focusNode,
-    required this.autofocus,
-    required this.onTap,
-    required this.onFocus,
-  });
-  final String label;
-  final bool selected;
-  final FocusNode focusNode;
-  final bool autofocus;
-  final VoidCallback onTap;
-  final VoidCallback? onFocus;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final television = AppScope.of(context).television;
-    final item = FocusPill(
-      focusNode: focusNode,
-      selected: selected,
-      textStyle: theme.textTheme.titleSmall?.copyWith(
-        fontSize: 15,
-        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-        color: theme.colorScheme.onSurface,
-      ),
-      child: InkWell(
-        focusNode: focusNode,
-        autofocus: autofocus,
-        focusColor: television ? Colors.transparent : null,
-        onTap: onTap,
-        onFocusChange: (focused) {
-          if (focused) onFocus?.call();
-        },
-        child: Container(
-          height: 48,
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          alignment: Alignment.centerLeft,
-          child: Text(label),
-        ),
-      ),
-    );
-    return Semantics(
-      selected: selected,
-      child: television ? item : FocusRing(radius: 24, scale: 1, child: item),
-    );
-  }
 }

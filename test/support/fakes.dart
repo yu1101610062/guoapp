@@ -176,6 +176,7 @@ class FakeRepository extends AppRepository {
   List<RankingBoard> boardList = const [];
   final cachedPages = <String, CatalogPage>{};
   final catalogRequests = <String>[];
+  final catalogLanes = <String>[];
   final rankingRequests = <String>[];
   final recommendRequests = <({bool more, bool force})>[];
   String failure = '';
@@ -284,8 +285,10 @@ class FakeRepository extends AppRepository {
     int page = 1,
     String query = '',
     String category = '',
+    String lane = '',
     bool force = false,
   }) async {
+    catalogLanes.add(lane);
     catalogRequests.add('$source|$category|$query|$page${force ? '!' : ''}');
     if (failure.isNotEmpty) throw AppFailure(failure);
     return pageFor(source, category, query, page);

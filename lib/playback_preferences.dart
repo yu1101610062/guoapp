@@ -13,7 +13,13 @@ const danmakuColors = [
   0xFF8CF08C,
 ];
 
-enum TelevisionDecoder { optimized, hardware, software }
+enum TelevisionDecoder {
+  optimized,
+  hardware,
+  software,
+  hardwareSwapUv,
+  hardwareDirect,
+}
 
 enum DanmakuCoverage {
   quarter(.25, '顶部四分之一'),
@@ -23,6 +29,18 @@ enum DanmakuCoverage {
   const DanmakuCoverage(this.fraction, this.label);
 
   final double fraction;
+  final String label;
+}
+
+enum DanmakuMerge {
+  off(0, '关闭'),
+  ten(10, '10 秒'),
+  twenty(20, '20 秒'),
+  thirty(30, '30 秒');
+
+  const DanmakuMerge(this.seconds, this.label);
+
+  final int seconds;
   final String label;
 }
 
@@ -91,6 +109,7 @@ class PlaybackPreferences {
     this.danmakuShadow = 3,
     this.danmakuCoverage = DanmakuCoverage.half,
     this.danmakuSpeed = 1,
+    this.danmakuMerge = DanmakuMerge.ten,
     this.danmakuWords = const [],
     this.preload = true,
     this.televisionDecoder = TelevisionDecoder.optimized,
@@ -104,7 +123,9 @@ class PlaybackPreferences {
     this.autoHideControls = true,
     this.hideSystemBars = true,
     this.portraitStyleForWide = false,
+    this.directPlay = false,
     this.autoPictureInPicture = false,
+    this.backgroundPlayback = false,
     this.videoFit = VideoFit.auto,
   });
 
@@ -120,6 +141,7 @@ class PlaybackPreferences {
   final double danmakuShadow;
   final DanmakuCoverage danmakuCoverage;
   final double danmakuSpeed;
+  final DanmakuMerge danmakuMerge;
   final double boostSpeed;
 
   String get boostLabel =>
@@ -137,7 +159,9 @@ class PlaybackPreferences {
   final bool autoHideControls;
   final bool hideSystemBars;
   final bool portraitStyleForWide;
+  final bool directPlay;
   final bool autoPictureInPicture;
+  final bool backgroundPlayback;
   final VideoFit videoFit;
 
   bool preopens({required bool television}) => preopen ?? !television;
@@ -155,6 +179,7 @@ class PlaybackPreferences {
     double? danmakuShadow,
     DanmakuCoverage? danmakuCoverage,
     double? danmakuSpeed,
+    DanmakuMerge? danmakuMerge,
     double? boostSpeed,
     List<String>? danmakuWords,
     bool? preload,
@@ -169,7 +194,9 @@ class PlaybackPreferences {
     bool? autoHideControls,
     bool? hideSystemBars,
     bool? portraitStyleForWide,
+    bool? directPlay,
     bool? autoPictureInPicture,
+    bool? backgroundPlayback,
     VideoFit? videoFit,
   }) => PlaybackPreferences(
     speed: speed ?? this.speed,
@@ -184,6 +211,7 @@ class PlaybackPreferences {
     danmakuShadow: danmakuShadow ?? this.danmakuShadow,
     danmakuCoverage: danmakuCoverage ?? this.danmakuCoverage,
     danmakuSpeed: danmakuSpeed ?? this.danmakuSpeed,
+    danmakuMerge: danmakuMerge ?? this.danmakuMerge,
     boostSpeed: boostSpeed ?? this.boostSpeed,
     danmakuWords: danmakuWords ?? this.danmakuWords,
     preload: preload ?? this.preload,
@@ -198,7 +226,9 @@ class PlaybackPreferences {
     autoHideControls: autoHideControls ?? this.autoHideControls,
     hideSystemBars: hideSystemBars ?? this.hideSystemBars,
     portraitStyleForWide: portraitStyleForWide ?? this.portraitStyleForWide,
+    directPlay: directPlay ?? this.directPlay,
     autoPictureInPicture: autoPictureInPicture ?? this.autoPictureInPicture,
+    backgroundPlayback: backgroundPlayback ?? this.backgroundPlayback,
     videoFit: videoFit ?? this.videoFit,
   );
 
@@ -215,6 +245,7 @@ class PlaybackPreferences {
     'danmakuShadow': danmakuShadow,
     'danmakuCoverage': danmakuCoverage.name,
     'danmakuSpeed': danmakuSpeed,
+    'danmakuMerge': danmakuMerge.name,
     'boostSpeed': boostSpeed,
     'danmakuWords': danmakuWords,
     'preload': preload,
@@ -229,7 +260,9 @@ class PlaybackPreferences {
     'autoHideControls': autoHideControls,
     'hideSystemBars': hideSystemBars,
     'portraitStyleForWide': portraitStyleForWide,
+    'directPlay': directPlay,
     'autoPictureInPicture': autoPictureInPicture,
+    'backgroundPlayback': backgroundPlayback,
     'videoFit': videoFit.name,
   };
 
@@ -275,6 +308,9 @@ class PlaybackPreferences {
         danmakuSpeedMin,
         danmakuSpeedMax,
       ),
+      danmakuMerge:
+          DanmakuMerge.values.asNameMap()[value['danmakuMerge']] ??
+          DanmakuMerge.ten,
       danmakuWords: normalizeDanmakuWords(value['danmakuWords']),
       preload: preload,
       televisionDecoder:
@@ -290,7 +326,9 @@ class PlaybackPreferences {
       autoHideControls: value['autoHideControls'] as bool? ?? true,
       hideSystemBars: value['hideSystemBars'] as bool? ?? true,
       portraitStyleForWide: value['portraitStyleForWide'] as bool? ?? false,
+      directPlay: value['directPlay'] as bool? ?? false,
       autoPictureInPicture: value['autoPictureInPicture'] as bool? ?? false,
+      backgroundPlayback: value['backgroundPlayback'] as bool? ?? false,
       videoFit: VideoFit.values.asNameMap()[value['videoFit']] ?? VideoFit.auto,
     );
   }

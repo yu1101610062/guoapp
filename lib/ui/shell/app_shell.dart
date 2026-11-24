@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -63,6 +64,34 @@ class ShellForeground extends InheritedWidget {
       foreground != oldWidget.foreground;
 }
 
+class ShellBars extends InheritedNotifier<ValueNotifier<bool>> {
+  const ShellBars({super.key, required super.notifier, required super.child});
+
+  static bool shown(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<ShellBars>()
+          ?.notifier
+          ?.value ??
+      true;
+}
+
+class HideOnScroll extends StatelessWidget {
+  const HideOnScroll({super.key, required this.alignment, required this.child});
+  final Alignment alignment;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ClipRect(
+    child: AnimatedAlign(
+      alignment: alignment,
+      heightFactor: ShellBars.shown(context) ? 1 : 0,
+      duration: Motion.of(context, Motion.medium),
+      curve: Motion.standard,
+      child: child,
+    ),
+  );
+}
+
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.store});
   final LocalStore store;
@@ -72,9 +101,6 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
-  final _heroes = [
-    for (final _ in AppTab.values) MaterialApp.createMaterialHeroController(),
-  ];
   final _navigators = [
     for (final _ in AppTab.values) GlobalKey<NavigatorState>(),
   ];
@@ -85,6 +111,10 @@ class _AppShellState extends State<AppShell> {
   final _header = FocusNode();
   final _televisionTabs = GlobalKey();
   final _explore = GlobalKey<ExplorePageState>();
+  static const _revealVelocity = 400.0;
+  final _barsShown = ValueNotifier(true);
+  final _scrollClock = Stopwatch()..start();
+  var _scrollVelocity = VelocityTracker.withKind(PointerDeviceKind.touch);
   var _tab = AppTab.explore;
   var _headerFocused = false;
   FocusNode? _lastFocus;
@@ -135,12 +165,10 @@ class _AppShellState extends State<AppShell> {
     for (final scroll in _tabScrolls) {
       scroll.dispose();
     }
-    for (final hero in _heroes) {
-      hero.dispose();
-    }
     _followEntry.dispose();
     _mineEntry.dispose();
     _header.dispose();
+    _barsShown.dispose();
     _exitWindow?.cancel();
     _converter?.dispose();
     _merges?.dispose();
@@ -159,7 +187,36 @@ class _AppShellState extends State<AppShell> {
         tab,
   ];
 
-  void _select(AppTab tab) => setState(() => _tab = tab);
+  void _select(AppTab tab) {
+    _barsShown.value = true;
+    setState(() => _tab = tab);
+  }
+
+  bool _scrolled(ScrollNotification notification) {
+    final metrics = notification.metrics;
+    if (metrics.axis != Axis.vertical) return false;
+    if (notification is ScrollStartNotification) {
+      _scrollVelocity = VelocityTracker.withKind(PointerDeviceKind.touch);
+    }
+    if (metrics.pixels <= metrics.minScrollExtent) {
+      _barsShown.value = true;
+    } else if (notification is ScrollUpdateNotification &&
+        !metrics.outOfRange) {
+      _scrollVelocity.addPosition(
+        _scrollClock.elapsed,
+        Offset(0, metrics.pixels),
+      );
+      final delta = notification.scrollDelta ?? 0;
+      if (delta > 0) {
+        _barsShown.value = false;
+      } else if (delta < 0) {
+        final velocity =
+            _scrollVelocity.getVelocityEstimate()?.pixelsPerSecond.dy ?? 0;
+        if (-velocity >= _revealVelocity) _barsShown.value = true;
+      }
+    }
+    return false;
+  }
 
   void _tap(AppTab tab) {
     if (tab != _tab) return _select(tab);
@@ -264,22 +321,19 @@ class _AppShellState extends State<AppShell> {
           for (final tab in AppTab.values)
             _TabFade(
               selected: tab == _tab,
-              child: HeroControllerScope(
-                controller: _heroes[tab.index],
-                child: Navigator(
-                  key: _navigators[tab.index],
-                  routeTraversalEdgeBehavior: TraversalEdgeBehavior.parentScope,
-                  routeDirectionalTraversalEdgeBehavior:
-                      TraversalEdgeBehavior.parentScope,
-                  onGenerateInitialRoutes: (_, _) => [
-                    MaterialPageRoute<void>(
-                      builder: (_) => PrimaryScrollController(
-                        controller: _tabScrolls[tab.index],
-                        child: _root(tab),
-                      ),
+              child: Navigator(
+                key: _navigators[tab.index],
+                routeTraversalEdgeBehavior: TraversalEdgeBehavior.parentScope,
+                routeDirectionalTraversalEdgeBehavior:
+                    TraversalEdgeBehavior.parentScope,
+                onGenerateInitialRoutes: (_, _) => [
+                  MaterialPageRoute<void>(
+                    builder: (_) => PrimaryScrollController(
+                      controller: _tabScrolls[tab.index],
+                      child: _root(tab),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
         ],
@@ -303,23 +357,33 @@ class _AppShellState extends State<AppShell> {
         if (!didPop) _back();
       },
       child: switch (AppScope.formFactorOf(context)) {
-        FormFactor.phone => Scaffold(
-          body: pages,
-          bottomNavigationBar: covered
-              ? null
-              : NavigationBar(
-                  selectedIndex: tabs.indexOf(_tab),
-                  onDestinationSelected: (index) => _tap(tabs[index]),
-                  destinations: [
-                    for (final tab in tabs)
-                      NavigationDestination(
-                        key: ValueKey('nav-${tab.name}'),
-                        icon: _badged(tab, Icon(tab.icon)),
-                        selectedIcon: _badged(tab, Icon(tab.selectedIcon)),
-                        label: tab.label,
-                      ),
-                  ],
-                ),
+        FormFactor.phone => ShellBars(
+          notifier: _barsShown,
+          child: Scaffold(
+            body: NotificationListener<ScrollNotification>(
+              onNotification: _scrolled,
+              child: pages,
+            ),
+            bottomNavigationBar: covered
+                ? null
+                : HideOnScroll(
+                    alignment: Alignment.topCenter,
+                    child: NavigationBar(
+                      height: 72,
+                      selectedIndex: tabs.indexOf(_tab),
+                      onDestinationSelected: (index) => _tap(tabs[index]),
+                      destinations: [
+                        for (final tab in tabs)
+                          NavigationDestination(
+                            key: ValueKey('nav-${tab.name}'),
+                            icon: _badged(tab, Icon(tab.icon)),
+                            selectedIcon: _badged(tab, Icon(tab.selectedIcon)),
+                            label: tab.label,
+                          ),
+                      ],
+                    ),
+                  ),
+          ),
         ),
         FormFactor.pad || FormFactor.window => _wide(pages),
         FormFactor.television => Scaffold(
@@ -418,10 +482,8 @@ class _AppShellState extends State<AppShell> {
           Expanded(
             child: RepaintBoundary(
               child: Builder(
-                // Read the body's MediaQuery after Scaffold consumes the
-                // keyboard inset; the outer context would apply it twice.
-                builder: (bodyContext) => MediaQuery.removePadding(
-                  context: bodyContext,
+                builder: (body) => MediaQuery.removePadding(
+                  context: body,
                   removeLeft: true,
                   child: pages,
                 ),

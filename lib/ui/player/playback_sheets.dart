@@ -26,20 +26,41 @@ Future<void> showPlayerSheet(
   BuildContext context,
   WidgetBuilder builder, {
   bool dark = true,
+  bool fitContent = false,
+  Color? barrierColor,
 }) {
   final theme = dark ? playerTheme(context) : Theme.of(context);
   final height = MediaQuery.sizeOf(context).height * .6;
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    showDragHandle: true,
+    barrierColor: barrierColor,
     backgroundColor: theme.colorScheme.surfaceContainerLow,
-    constraints: BoxConstraints.tightFor(height: height),
+    constraints: fitContent
+        ? BoxConstraints(maxHeight: height)
+        : BoxConstraints.tightFor(height: height),
     builder: (context) => Theme(
       data: theme,
       child: DefaultTextStyle.merge(
         style: TextStyle(color: theme.colorScheme.onSurface),
-        child: Builder(builder: builder),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 32,
+                height: 4,
+                margin: const EdgeInsets.only(top: 10),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Flexible(child: Builder(builder: builder)),
+          ],
+        ),
       ),
     ),
   );
@@ -175,21 +196,23 @@ class PlaybackSettingsList extends StatelessWidget {
                       ),
                   ],
           ),
-          const SizedBox(height: 18),
-          Text('画面比例', style: label),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final fit in VideoFit.values)
-                _Choice(
-                  label: fit.label,
-                  selected: fit == session.videoFit,
-                  onSelected: () => _change(() => session.setVideoFit(fit)),
-                ),
-            ],
-          ),
+          if (!session.audio) ...[
+            const SizedBox(height: 18),
+            Text('画面比例', style: label),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final fit in VideoFit.values)
+                  _Choice(
+                    label: fit.label,
+                    selected: fit == session.videoFit,
+                    onSelected: () => _change(() => session.setVideoFit(fit)),
+                  ),
+              ],
+            ),
+          ],
           const SizedBox(height: 18),
           Text(sleepTimerLabel(session), style: label),
           const SizedBox(height: 10),
@@ -221,7 +244,7 @@ class PlaybackSettingsList extends StatelessWidget {
               leading: const Icon(Icons.text_fields_rounded),
               title: const Text('弹幕样式'),
               subtitle: Text(
-                '字号、颜色、透明度与显示区域',
+                '字号、颜色、透明度、合并与显示区域',
                 style: TextStyle(fontSize: 12, color: label.color),
               ),
               children: [

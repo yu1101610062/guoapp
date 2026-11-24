@@ -60,14 +60,6 @@ KeyEventResult wrapGridRow(int index, int columns, int count, KeyEvent event) {
   }
 }
 
-Map<String, int> firstIndexById<T>(List<T> items, String Function(T) idOf) {
-  final first = <String, int>{};
-  for (final (index, item) in items.indexed) {
-    first.putIfAbsent(idOf(item), () => index);
-  }
-  return first;
-}
-
 class DramaSliverGrid extends StatelessWidget {
   const DramaSliverGrid({
     super.key,
@@ -78,7 +70,6 @@ class DramaSliverGrid extends StatelessWidget {
     this.rankOf,
     this.autofocus = false,
     this.entered,
-    this.heroScope,
     this.showScore = false,
     this.exploreBlur = false,
   });
@@ -90,15 +81,11 @@ class DramaSliverGrid extends StatelessWidget {
   final int? Function(Drama drama)? rankOf;
   final bool autofocus;
   final Set<Object>? entered;
-  final String? heroScope;
   final bool showScore;
 
   @override
   Widget build(BuildContext context) {
     final (columns, _, _) = _gridLayout(context, width);
-    final heroIndex = heroScope == null
-        ? const <String, int>{}
-        : firstIndexById(items, (drama) => drama.id);
     return SliverGrid.builder(
       gridDelegate: dramaGridDelegate(context, width),
       itemCount: items.length,
@@ -114,7 +101,6 @@ class DramaSliverGrid extends StatelessWidget {
             drama: drama,
             rank: rankOf?.call(drama),
             autofocus: autofocus && index == 0,
-            heroScope: heroIndex[drama.id] == index ? heroScope : null,
             showScore: showScore,
             exploreBlur: exploreBlur,
             onTap: () => onOpen(drama),
@@ -269,6 +255,129 @@ class FeedFooter extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class DramaGridSkeleton extends StatefulWidget {
+  const DramaGridSkeleton({super.key, required this.padding});
+  final EdgeInsets padding;
+
+  @override
+  State<DramaGridSkeleton> createState() => _DramaGridSkeletonState();
+}
+
+class _DramaGridSkeletonState extends State<DramaGridSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+  late final _opacity = Tween(
+    begin: .45,
+    end: 1.0,
+  ).animate(CurvedAnimation(parent: _pulse, curve: Motion.standard));
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (Motion.reduced(context)) {
+      _pulse
+        ..stop()
+        ..value = 1;
+    } else if (!_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: '正在加载',
+    child: ExcludeSemantics(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final padding = widget.padding;
+          final width = constraints.maxWidth - padding.horizontal;
+          final (columns, _, runSpacing) = _gridLayout(context, width);
+          final extent = DramaTile.extentFor(
+            context,
+            dramaTileWidth(context, width),
+          );
+          final rows = constraints.hasBoundedHeight
+              ? ((constraints.maxHeight - padding.vertical) /
+                        (extent + runSpacing))
+                    .ceil()
+                    .clamp(1, 12)
+              : 4;
+          final fill = Theme.of(context).colorScheme.surfaceContainerHighest;
+          return FadeTransition(
+            opacity: _opacity,
+            child: GridView.builder(
+              primary: false,
+              physics: const NeverScrollableScrollPhysics(),
+              padding: padding,
+              gridDelegate: dramaGridDelegate(context, width),
+              itemCount: rows * columns,
+              itemBuilder: (context, _) => _SkeletonTile(fill: fill),
+            ),
+          );
+        },
+      ),
+    ),
+  );
+}
+
+class _SkeletonTile extends StatelessWidget {
+  const _SkeletonTile({required this.fill});
+  final Color fill;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final title = scaler.scale(DramaTile.titleStyle(context).fontSize!) * 1.3;
+    final subtitle =
+        scaler.scale(DramaTile.subtitleStyle(context).fontSize!) * 1.3;
+    Widget bar(double height, double width) => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: SizedBox(
+        height: height,
+        child: FractionallySizedBox(
+          alignment: Alignment.centerLeft,
+          widthFactor: width,
+          heightFactor: .7,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: fill,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+        ),
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        AspectRatio(
+          aspectRatio: 2 / 3,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: fill,
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+        const SizedBox(height: 9),
+        bar(title, .9),
+        bar(title, .6),
+        const SizedBox(height: 4),
+        bar(subtitle, .4),
+      ],
     );
   }
 }

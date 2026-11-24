@@ -141,6 +141,7 @@ type nativeEngine struct {
 	catalogs            map[string][]LibraryDrama
 	catalogStates       map[string]nativeCatalogState
 	categoryOptions     map[string][]Category
+	categoryVersions    map[string]string
 	providerStates      map[string]json.RawMessage
 	providerStatesSaved []byte
 	recommendations     map[string]nativeRecommendationState
@@ -254,6 +255,7 @@ func newNativeEngine(directory, cache, downloads string) (*nativeEngine, error) 
 	router := &proxyRouter{}
 	d := &Downloader{cfg: cfg, providerHosts: map[string]string{}, proxyRouter: router,
 		limiter: newRequestLimiter(3, 0), diagnostics: newDiagnosticLog(directory)}
+	router.record = d.recordDiagnostic
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	transport.MaxIdleConnsPerHost = 8
@@ -654,7 +656,8 @@ func (engine *nativeEngine) nativeResolve(ctx context.Context, input nativeInput
 		return nativePlan{}, err
 	}
 	choice := nativePlaybackChoices(media, input.Quality)
-	if p, ok := engine.downloader.provider(SourceFromDramaID(task.DramaID)); ok {
+	choice.source = SourceFromDramaID(task.DramaID)
+	if p, ok := engine.downloader.provider(choice.source); ok {
 		if danmaku, ok := providerAs[DanmakuProvider](p); ok {
 			if series, video, valid := danmaku.DanmakuIDs(task); valid {
 				choice.danmakuSource, choice.danmakuSeries, choice.danmakuVideo = p.Descriptor().ID, series, video

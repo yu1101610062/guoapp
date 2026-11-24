@@ -1,19 +1,24 @@
 #include "flutter_window.h"
 
 #include <commctrl.h>
+#include <dwmapi.h>
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <string>
 #include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
+
+#include "mini_edge_snap.h"
 
 namespace {
 
 constexpr double kMiniExtent = 480;
 constexpr double kMiniMinExtent = 200;
 constexpr double kMiniMargin = 24;
+constexpr int kBossKeyId = 1;
 
 std::optional<int> IntArgument(const flutter::EncodableMap& args,
                                const char* key) {
@@ -24,6 +29,25 @@ std::optional<int> IntArgument(const flutter::EncodableMap& args,
     return static_cast<int>(*value);
   }
   return std::nullopt;
+}
+
+bool BoolArgument(const flutter::EncodableMap& args, const char* key) {
+  const auto found = args.find(flutter::EncodableValue(key));
+  if (found == args.end()) return false;
+  const auto* value = std::get_if<bool>(&found->second);
+  return value && *value;
+}
+
+UINT BossKeyCode(const std::string& key) {
+  if (key.size() == 1 && ((key[0] >= 'A' && key[0] <= 'Z') ||
+                          (key[0] >= '0' && key[0] <= '9'))) {
+    return key[0];
+  }
+  if (key.size() >= 2 && key.size() <= 3 && key[0] == 'F') {
+    const int number = std::atoi(key.c_str() + 1);
+    if (number >= 1 && number <= 12) return VK_F1 + number - 1;
+  }
+  return 0;
 }
 
 SIZE MiniSize(double aspect, double extent) {
@@ -72,6 +96,8 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  media_controls_ = std::make_unique<MediaControls>(
+      GetHandle(), flutter_controller_->engine()->messenger());
   device_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           flutter_controller_->engine()->messenger(), "duanju/device",
@@ -129,6 +155,17 @@ bool FlutterWindow::OnCreate() {
           result->Success();
           return;
         }
+        if (call.method_name() == "setBossKey") {
+          result->Success(flutter::EncodableValue(SetBossKey(
+              std::get_if<flutter::EncodableMap>(call.arguments()))));
+          return;
+        }
+        if (call.method_name() == "setMiniEdgeSnap") {
+          const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
+          edge_snap_.SetEnabled(args && BoolArgument(*args, "enabled"));
+          result->Success();
+          return;
+        }
         if (call.method_name() != "playbackPower") {
           result->NotImplemented();
           return;
@@ -152,6 +189,12 @@ bool FlutterWindow::OnCreate() {
       FAILED(taskbar_->HrInit())) {
     taskbar_.Reset();
   }
+  edge_snap_.Init(GetHandle(), [this](bool hidden) {
+    if (device_channel_) {
+      device_channel_->InvokeMethod(
+          "miniEdgeHidden", std::make_unique<flutter::EncodableValue>(hidden));
+    }
+  });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
   SetWindowSubclass(flutter_controller_->view()->GetNativeWindow(),
                     DeclineAccessibilityQueries, 0, 0);
@@ -173,7 +216,6 @@ void FlutterWindow::SetFullScreen(bool enabled) {
     return;
   }
   HWND window = GetHandle();
-  RECT target = frame_before_fullscreen_;
   if (enabled) {
     MONITORINFO monitor{};
     monitor.cbSize = sizeof(monitor);
@@ -181,13 +223,28 @@ void FlutterWindow::SetFullScreen(bool enabled) {
                         &monitor)) {
       return;
     }
-    GetWindowRect(window, &frame_before_fullscreen_);
-    target = monitor.rcMonitor;
+    placement_before_fullscreen_.length = sizeof(WINDOWPLACEMENT);
+    GetWindowPlacement(window, &placement_before_fullscreen_);
+    SetWindowLong(window, GWL_STYLE,
+                  GetWindowLong(window, GWL_STYLE) & ~WS_MAXIMIZE);
+    fullscreen_ = true;
+    const RECT target = monitor.rcMonitor;
+    SetWindowPos(window, nullptr, target.left, target.top,
+                 target.right - target.left, target.bottom - target.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+  } else {
+    fullscreen_ = false;
+    SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                     SWP_FRAMECHANGED);
+    BOOL transitions_disabled = TRUE;
+    DwmSetWindowAttribute(window, DWMWA_TRANSITIONS_FORCEDISABLED,
+                          &transitions_disabled, sizeof(transitions_disabled));
+    SetWindowPlacement(window, &placement_before_fullscreen_);
+    transitions_disabled = FALSE;
+    DwmSetWindowAttribute(window, DWMWA_TRANSITIONS_FORCEDISABLED,
+                          &transitions_disabled, sizeof(transitions_disabled));
   }
-  fullscreen_ = enabled;
-  SetWindowPos(window, nullptr, target.left, target.top,
-               target.right - target.left, target.bottom - target.top,
-               SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
   if (taskbar_) {
     taskbar_->MarkFullscreenWindow(window, enabled);
   }
@@ -198,7 +255,9 @@ void FlutterWindow::EnterMiniWindow(double aspect,
   HWND window = GetHandle();
   const double scale = WindowScale(window);
   mini_aspect_ = aspect;
+  edge_snap_.SetScale(scale);
   if (mini_) {
+    edge_snap_.Reset();
     RECT frame;
     GetWindowRect(window, &frame);
     const SIZE size = MiniSize(
@@ -241,9 +300,11 @@ void FlutterWindow::EnterMiniWindow(double aspect,
   style_before_mini_ = GetWindowLong(window, GWL_STYLE);
   SetWindowLong(window, GWL_STYLE, style_before_mini_ & ~WS_CAPTION);
   mini_ = true;
+  edge_snap_.Reset();
   SetWindowPos(window, HWND_TOPMOST, target.left, target.top,
                target.right - target.left, target.bottom - target.top,
                SWP_FRAMECHANGED);
+  edge_snap_.SetMiniActive(true);
 }
 
 flutter::EncodableValue FlutterWindow::ExitMiniWindow() {
@@ -251,6 +312,8 @@ flutter::EncodableValue FlutterWindow::ExitMiniWindow() {
     return flutter::EncodableValue();
   }
   HWND window = GetHandle();
+  edge_snap_.SetMiniActive(false);
+  edge_snap_.Reset();
   RECT frame;
   GetWindowRect(window, &frame);
   mini_ = false;
@@ -312,6 +375,34 @@ bool FlutterWindow::SetWindowFrame(const flutter::EncodableMap& args) {
   return true;
 }
 
+bool FlutterWindow::SetBossKey(const flutter::EncodableMap* args) {
+  HWND window = GetHandle();
+  UnregisterHotKey(window, kBossKeyId);
+  if (!args) return true;
+  const auto found = args->find(flutter::EncodableValue("key"));
+  const auto* key =
+      found == args->end() ? nullptr : std::get_if<std::string>(&found->second);
+  const UINT code = key ? BossKeyCode(*key) : 0;
+  if (!code) return false;
+  UINT modifiers = MOD_NOREPEAT;
+  if (BoolArgument(*args, "ctrl")) modifiers |= MOD_CONTROL;
+  if (BoolArgument(*args, "alt")) modifiers |= MOD_ALT;
+  if (BoolArgument(*args, "shift")) modifiers |= MOD_SHIFT;
+  if (BoolArgument(*args, "meta")) modifiers |= MOD_WIN;
+  return RegisterHotKey(window, kBossKeyId, modifiers, code) != 0;
+}
+
+void FlutterWindow::ToggleHidden() {
+  HWND window = GetHandle();
+  if (IsWindowVisible(window)) {
+    if (device_channel_) device_channel_->InvokeMethod("bossKeyHidden", nullptr);
+    ShowWindow(window, SW_HIDE);
+    return;
+  }
+  ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
+  SetForegroundWindow(window);
+}
+
 void FlutterWindow::KeepMiniAspect(WPARAM edge, RECT* frame) {
   double width = frame->right - frame->left;
   double height = frame->bottom - frame->top;
@@ -339,6 +430,8 @@ void FlutterWindow::KeepMiniAspect(WPARAM edge, RECT* frame) {
 }
 
 void FlutterWindow::OnDestroy() {
+  UnregisterHotKey(GetHandle(), kBossKeyId);
+  media_controls_.reset();
   device_channel_.reset();
   taskbar_.Reset();
   if (flutter_controller_) {
@@ -352,6 +445,15 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_ENTERSIZEMOVE) {
+    edge_snap_.SetDragActive(true);
+  } else if (message == WM_MOVING) {
+    edge_snap_.OnMoving(reinterpret_cast<RECT*>(lparam));
+  } else if (message == WM_EXITSIZEMOVE) {
+    edge_snap_.SetScale(WindowScale(hwnd));
+    edge_snap_.OnDragFinished();
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
@@ -379,9 +481,37 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         return TRUE;
       }
       break;
+    case WM_SYSCOMMAND:
+      if (mini_ && (wparam & 0xFFF0) == SC_MOVE) {
+        const LONG style = GetWindowLong(hwnd, GWL_STYLE);
+        SetWindowLong(hwnd, GWL_STYLE,
+                      style & ~(WS_THICKFRAME | WS_MAXIMIZEBOX));
+        const LRESULT moved = DefWindowProc(hwnd, message, wparam, lparam);
+        SetWindowLong(hwnd, GWL_STYLE, style);
+        return moved;
+      }
+      break;
+    case WM_DPICHANGED:
+      edge_snap_.SetScale(WindowScale(hwnd));
+      break;
+    case WM_TIMER:
+      if (wparam == mini_edge_snap::kTimerId) {
+        edge_snap_.OnTimerTick();
+        return 0;
+      }
+      break;
+    case WM_HOTKEY:
+      if (wparam == kBossKeyId) {
+        ToggleHidden();
+        return 0;
+      }
+      break;
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case MediaControls::kCommandMessage:
+      if (media_controls_) media_controls_->HandleCommand(wparam, lparam);
+      return 0;
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);

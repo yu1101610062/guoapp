@@ -480,8 +480,8 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
             ),
             PlayerLockOverlay(
               locked: locked,
-              alignment: Alignment.centerLeft,
-              padding: const EdgeInsets.only(left: 20),
+              alignments: [Alignment.centerLeft, Alignment.centerRight],
+              padding: const EdgeInsets.only(left: 20, right: 20),
               onUnlock: _unlock,
               onBlocked: () => widget.onSay('已锁定，点击锁图标解锁'),
             ),
@@ -746,7 +746,7 @@ class _PlayerSurfaceState extends State<PlayerSurface> {
     final showWide = !widget.touch && !widget.fullscreen && fits(_iconSlot);
     final showDanmaku = _session.danmakuSupported && fits(_iconSlot + 4);
     final showVolume = !widget.touch && fits(_iconSlot);
-    final showFit = fits(_iconSlot);
+    final showFit = !_session.audio && fits(_iconSlot);
     final showMiniWindow = widget.onMiniWindow != null && fits(_iconSlot);
     final showSleep = fits(_iconSlot);
     final showCast = castSupported && fits(_iconSlot);
@@ -1283,6 +1283,11 @@ class PlaybackFailure extends StatelessWidget {
                       focusNode: retryFocus,
                       onPressed: session.retry,
                       child: Text(session.localFailure ? '重试本地播放' : '重试'),
+                    ),
+                  if (!session.loginRequired && session.currentPosition > 0)
+                    TextButton(
+                      onPressed: session.retryFromStart,
+                      child: const Text('从头播放'),
                     ),
                   if (session.localFailure)
                     TextButton(

@@ -4,18 +4,37 @@ import 'dart:ui' show Size;
 
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'core_bridge.dart';
 import 'danmaku_controller.dart';
 import 'danmaku_style.dart';
 import 'diary_service.dart';
+import 'follow_state.dart';
 import 'local_store.dart';
+import 'media_controls.dart';
 import 'models.dart';
 import 'playback_loader.dart';
 import 'playback_preferences.dart';
 import 'playback_preloader.dart';
 import 'playback_recovery.dart';
 import 'sync/sync_state.dart';
+
+const _swapChromaSource = '''
+//!HOOK NATIVE
+//!BIND HOOKED
+//!DESC swap chroma
+vec4 hook() {
+    return HOOKED_tex(HOOKED_pos).xzyw;
+}
+''';
+
+Future<String> _swapChromaShader() async {
+  final directory = await getApplicationSupportDirectory();
+  final file = File('${directory.path}/swap_chroma.glsl');
+  await file.writeAsString(_swapChromaSource);
+  return file.path;
+}
 
 Size? videoDisplaySize(VideoParams parameters) {
   final width = (parameters.dw ?? 0) > 0 ? parameters.dw! : parameters.w ?? 0;
@@ -27,12 +46,37 @@ Size? videoDisplaySize(VideoParams parameters) {
       : Size(width.toDouble(), height.toDouble());
 }
 
+bool audioOnly(Tracks tracks) {
+  bool real(String id) => id != 'auto' && id != 'no';
+  return tracks.audio.any((track) => real(track.id)) &&
+      !tracks.video.any(
+        (track) =>
+            real(track.id) && track.albumart != true && track.image != true,
+      );
+}
+
+final _diagnosticAddress = RegExp(r'[a-z]+://\S+', caseSensitive: false);
+
 String _diagnostic(Object error) {
-  final text = error.toString().replaceAll(
-    RegExp(r'[a-z]+://\S+', caseSensitive: false),
-    '[地址]',
-  );
+  final text = error.toString().replaceAll(_diagnosticAddress, '[地址]');
   return text.length > 300 ? text.substring(0, 300) : text;
+}
+
+String _diagnosticPlaybackTarget(String? address) {
+  if (address == null || address.isEmpty) return 'unknown';
+  final uri = Uri.tryParse(address);
+  if (uri == null) return 'unknown';
+  if (uri.scheme == 'file') return 'local_file';
+  if (!const {'http', 'https', 'tcp', 'tls'}.contains(uri.scheme)) {
+    return 'unknown';
+  }
+  final host = uri.host;
+  if (host.isEmpty) return 'unknown';
+  if (host.toLowerCase() == 'localhost' ||
+      InternetAddress.tryParse(host)?.isLoopback == true) {
+    return 'loopback port=${uri.port}';
+  }
+  return 'remote';
 }
 
 class PlaybackSession extends ChangeNotifier {
@@ -60,9 +104,11 @@ class PlaybackSession extends ChangeNotifier {
     _preloader = PlaybackPreloader(repository)..addListener(_prime);
     danmaku = DanmakuController(repository)
       ..setEnabled(_danmakuEnabled)
+      ..setMergeWindow(preferences.danmakuMerge)
       ..setBlockedWords(preferences.danmakuWords);
     store.addListener(_accessChanged);
-    store.addListener(_syncBlockedWords);
+    store.addListener(_syncDanmakuOptions);
+    store.addListener(_syncMedia);
     _bind();
     _saveTimer = Timer.periodic(
       const Duration(seconds: 5),
@@ -93,6 +139,7 @@ class PlaybackSession extends ChangeNotifier {
     _subscriptions.clear();
     final size = videoDisplaySize(player.state.videoParams);
     if (size != null) _videoSize = size;
+    if (audioOnly(player.state.tracks)) _audioDetected = true;
     _buffering(player.state.buffering);
     final stream = player.stream;
     _subscriptions.addAll([
@@ -121,6 +168,11 @@ class PlaybackSession extends ChangeNotifier {
       }),
       for (final changes in [stream.duration, stream.buffer, stream.rate])
         changes.listen((_) => _sync()),
+      stream.tracks.listen((tracks) {
+        if (_audioDetected || !audioOnly(tracks)) return;
+        _audioDetected = true;
+        _notify();
+      }),
       stream.videoParams.listen((parameters) {
         final size = videoDisplaySize(parameters);
         if (size == null || _closed) return;
@@ -216,6 +268,7 @@ class PlaybackSession extends ChangeNotifier {
   bool _closed = false;
   bool _acceptErrors = false;
   bool _foreground = true;
+  bool _visible = true;
   bool _playIntent = true;
   bool _pendingError = false;
   bool _boosting = false;
@@ -223,6 +276,7 @@ class PlaybackSession extends ChangeNotifier {
   bool _locked = false;
   bool _engaged;
   bool _staleAudio = false;
+  bool _audioDetected = false;
   bool _stalled = false;
   String _loadingMessage = '正在准备播放';
   String? _error;
@@ -269,6 +323,7 @@ class PlaybackSession extends ChangeNotifier {
     null => 9 / 16,
   };
   bool get aspectKnown => _videoSize != null;
+  bool get audio => episode.audio || _audioDetected;
   VideoFit get videoFit => _videoFit;
   double get speed => _speed;
   DateTime? get sleepAt => _sleepAt;
@@ -326,7 +381,9 @@ class PlaybackSession extends ChangeNotifier {
   }
 
   void _notify() {
-    if (!_closed) notifyListeners();
+    if (_closed) return;
+    notifyListeners();
+    _syncMedia();
   }
 
   void _accessChanged() {
@@ -345,14 +402,86 @@ class PlaybackSession extends ChangeNotifier {
     }
   }
 
-  void _syncBlockedWords() {
+  void _syncDanmakuOptions() {
     if (_closed) return;
-    danmaku.setBlockedWords(store.playbackPreferences.danmakuWords);
+    final preferences = store.playbackPreferences;
+    danmaku.setMergeWindow(preferences.danmakuMerge);
+    danmaku.setBlockedWords(preferences.danmakuWords);
   }
 
   void _sync() {
     _syncDanmaku();
     _syncPreload();
+    _syncMedia();
+  }
+
+  bool get _backgroundPlayback => store.playbackPreferences.backgroundPlayback;
+
+  bool get _videoHidden => Platform.isIOS && !_visible && _backgroundPlayback;
+
+  void _syncMedia() {
+    if (_closed) return;
+    final controls = MediaControls.instance;
+    if (!_backgroundPlayback || !_engaged || !_usable || store.locked) {
+      controls.release(this);
+      return;
+    }
+    if (!_playIntent && !controls.owns(this)) return;
+    final state = player.state;
+    final opened = ready && _openedIndex == _index;
+    controls.update(
+      this,
+      MediaState(
+        title: detail.drama.title,
+        subtitle: episode.title,
+        artwork: repository.knownCover(detail.drama) ?? '',
+        active: _playIntent && _error == null,
+        playing: _playIntent && state.playing,
+        position: opened ? state.position : Duration.zero,
+        duration: opened ? state.duration : Duration.zero,
+        rate: state.rate,
+        hasPrevious: hasPrevious,
+        hasNext: hasNext,
+      ),
+      _mediaCommand,
+    );
+  }
+
+  void _mediaCommand(MediaCommand command, Duration? position) {
+    if (_closed) return;
+    switch (command) {
+      case MediaCommand.play:
+        if (paused) togglePlayback();
+      case MediaCommand.pause:
+        _pause();
+      case MediaCommand.toggle:
+        if (paused) {
+          togglePlayback();
+        } else {
+          _pause();
+        }
+      case MediaCommand.next:
+        unawaited(next());
+      case MediaCommand.previous:
+        unawaited(previous());
+      case MediaCommand.seek:
+        if (position != null) unawaited(seekTo(position));
+    }
+  }
+
+  void pause() => _pause();
+
+  void _pause() {
+    if (!_usable || !_playIntent) return;
+    if (ready && player.state.playing) {
+      togglePlayback();
+      return;
+    }
+    _stop();
+    _cancelResumeWatchdog();
+    _pausedSince = DateTime.now();
+    _scheduleStandbyIdle();
+    _notify();
   }
 
   void _syncDanmaku() {
@@ -424,7 +553,15 @@ class PlaybackSession extends ChangeNotifier {
 
   void _playerError(String error) {
     if (_closed || !_acceptErrors || error.trim().isEmpty) return;
-    DiaryService.add('[Play] 播放器报错：${_diagnostic(error)}');
+    final target = _diagnosticAddress.firstMatch(error)?.group(0);
+    final plan = _plan;
+    final planned = plan?.local == true
+        ? 'local_file'
+        : _diagnosticPlaybackTarget(plan?.url);
+    DiaryService.add(
+      '[Play] 播放器报错：${_diagnostic(error)} '
+      'error_target=${_diagnosticPlaybackTarget(target)} plan_target=$planned',
+    );
     _queueRecovery('player_error');
   }
 
@@ -475,19 +612,41 @@ class PlaybackSession extends ChangeNotifier {
     );
   }
 
+  bool get switchingSeason => _advancingSeason;
+
   Future<void> _playNextSeason() async {
     final season = detail.nextSeason;
-    if (_advancingSeason || season == null || !_usable) return;
+    if (season == null) return;
+    DiaryService.add('[Play] 本季播完，切换到${season.label}');
+    await _switchSeason(season, resume: false);
+  }
+
+  Future<bool> playSeason(DramaSeason season) async {
+    if (season.drama.id == detail.drama.id) return true;
+    DiaryService.add('[Play] 手动切换到${season.label}');
+    return _switchSeason(season, resume: true);
+  }
+
+  Future<bool> _switchSeason(DramaSeason season, {required bool resume}) async {
+    if (_advancingSeason || !_usable) return false;
     _advancingSeason = true;
     final ticket = _generation;
-    DiaryService.add('[Play] 本季播完，切换到${season.label}');
     _dropStandby();
     _preloader.clear();
+    _notify();
     try {
-      await saveProgress();
+      await saveProgress(urgent: true);
       final next = await repository.detail(season.drama);
-      if (!_current(ticket) || !_foreground) return;
-      if (next.episodes.isEmpty) throw AppFailure('下一季暂时没有可播放的分集');
+      if (!_current(ticket) || !_foreground) return false;
+      if (next.episodes.isEmpty) throw AppFailure('${season.label}暂时没有可播放的分集');
+      final watch = resume ? store.watched(season.drama.id) : null;
+      final index = resumeEpisodeIndex(next.episodes, watch);
+      final position =
+          watch != null &&
+              !watch.finished &&
+              matchWatchEpisode(next.episodes, watch) == index
+          ? watch.position
+          : 0.0;
       detail = DramaDetail(
         repository.catalogUpdates.current(season.drama).merge(next.drama),
         next.episodes,
@@ -495,14 +654,16 @@ class PlaybackSession extends ChangeNotifier {
         seasons: detail.seasons,
       );
       _openedIndex = -1;
-      _index = 0;
+      _index = index;
       _online = false;
       _notify();
-      await play(0);
+      await play(index, position: position);
+      return true;
     } catch (error) {
-      DiaryService.add('[Play] 切换下一季失败：${_diagnostic(error)}');
+      DiaryService.add('[Play] 切换${season.label}失败：${_diagnostic(error)}');
       if (_current(ticket)) _stop();
       _notify();
+      return false;
     } finally {
       _advancingSeason = false;
     }
@@ -622,12 +783,16 @@ class PlaybackSession extends ChangeNotifier {
   Future<void> _configure(Player target, PlaybackPlan plan) async {
     final platform = target.platform;
     if (platform is! NativePlayer) return;
-    final hwdec = switch (store.playbackPreferences.televisionDecoder) {
+    final decoder = store.playbackPreferences.televisionDecoder;
+    final hwdec = switch (decoder) {
       TelevisionDecoder.software => 'no',
-      TelevisionDecoder.hardware when Platform.isAndroid => 'mediacodec-copy',
+      TelevisionDecoder.hardwareDirect when Platform.isAndroid => 'mediacodec',
+      TelevisionDecoder.hardware || TelevisionDecoder.hardwareSwapUv
+          when Platform.isAndroid =>
+        'mediacodec-copy',
       TelevisionDecoder.hardware when Platform.isIOS || Platform.isMacOS =>
         'videotoolbox-copy',
-      _ when Platform.isWindows => 'd3d11va-copy',
+      _ when Platform.isWindows => 'd3d11va',
       _ when Platform.isAndroid => 'auto-safe',
       _ when Platform.isMacOS => 'auto-safe',
       _ => null,
@@ -640,6 +805,12 @@ class PlaybackSession extends ChangeNotifier {
       await platform.setProperty('vd-lavc-fast', 'yes');
       await platform.setProperty('video-sync', 'audio');
       await platform.setProperty('framedrop', 'vo');
+      await platform.setProperty(
+        'glsl-shaders',
+        decoder == TelevisionDecoder.hardwareSwapUv
+            ? await _swapChromaShader()
+            : '',
+      );
     }
     await platform.setProperty(
       'demuxer-lavf-o',
@@ -655,6 +826,9 @@ class PlaybackSession extends ChangeNotifier {
       ].join(','),
     );
     await platform.setProperty('network-timeout', '20');
+    if (Platform.isIOS) {
+      await platform.setProperty('vid', _videoHidden ? 'no' : 'auto');
+    }
   }
 
   Future<void> play(
@@ -965,6 +1139,8 @@ class PlaybackSession extends ChangeNotifier {
 
   Future<void> retry() =>
       play(_index, position: currentPosition, playWhenReady: true);
+
+  Future<void> retryFromStart() => play(_index);
 
   Future<void> switchOnline() {
     _online = true;
@@ -1375,6 +1551,13 @@ class PlaybackSession extends ChangeNotifier {
     _notify();
   }
 
+  Future<void> setDanmakuMerge(DanmakuMerge value) async {
+    await _savePreferences(
+      store.playbackPreferences.copyWith(danmakuMerge: value),
+    );
+    _notify();
+  }
+
   Future<void> setDanmakuWords(List<String> words) async {
     final normalized = normalizeDanmakuWords(words);
     await _savePreferences(
@@ -1384,12 +1567,15 @@ class PlaybackSession extends ChangeNotifier {
   }
 
   void setForeground(bool visible) {
-    if (_closed || _foreground == visible) return;
-    DiaryService.add(visible ? '[Play] 应用回到前台' : '[Play] 应用不可见，暂停播放');
-    _foreground = visible;
+    if (_closed) return;
+    _setVisible(visible);
+    final foreground = visible || _backgroundPlayback;
+    if (_foreground == foreground) return;
+    DiaryService.add(foreground ? '[Play] 应用回到前台' : '[Play] 应用不可见，暂停播放');
+    _foreground = foreground;
     _health.reset();
     _sync();
-    if (!visible) {
+    if (!foreground) {
       endBoost();
       _playIntent = false;
       _pausedSince = DateTime.now();
@@ -1402,6 +1588,28 @@ class PlaybackSession extends ChangeNotifier {
     } else {
       _holdNetworkSpeed();
       if (_pendingError) _queueRecovery('foreground_pending_error');
+    }
+  }
+
+  void _setVisible(bool visible) {
+    if (_visible == visible) return;
+    _visible = visible;
+    if (!visible && _backgroundPlayback) {
+      DiaryService.add('[Play] 应用不可见，后台继续播放');
+    }
+    if (!Platform.isIOS) return;
+    if (visible) {
+      _dropStandby();
+      _preloader.clear();
+    }
+    for (final target in [_player, ?_standby]) {
+      final platform = target.platform;
+      if (platform is! NativePlayer) continue;
+      unawaited(
+        platform
+            .setProperty('vid', _videoHidden ? 'no' : 'auto')
+            .catchError((Object _) {}),
+      );
     }
   }
 
@@ -1453,7 +1661,9 @@ class PlaybackSession extends ChangeNotifier {
     _closed = true;
     _generation++;
     store.removeListener(_accessChanged);
-    store.removeListener(_syncBlockedWords);
+    store.removeListener(_syncDanmakuOptions);
+    store.removeListener(_syncMedia);
+    MediaControls.instance.release(this);
     _saveTimer?.cancel();
     _healthTimer?.cancel();
     _errorTimer?.cancel();

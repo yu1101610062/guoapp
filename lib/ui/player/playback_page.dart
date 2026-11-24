@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +10,7 @@ import '../../local_store.dart';
 import '../../picture_in_picture.dart';
 import '../../playback_session.dart';
 import '../app_scope.dart';
+import 'audio_player_page.dart';
 import 'landscape_player_page.dart';
 import 'mini_player.dart';
 import 'playback_handle.dart';
@@ -32,6 +34,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   final _pageScope = FocusScopeNode(debugLabel: 'playbackPage');
   final _pip = PictureInPicture.instance;
   late bool _wideVideo = _measure();
+  late bool _audio = _session.audio;
   MediaQueryData? _media;
   bool _shown = false;
   bool _locked = false;
@@ -40,7 +43,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
 
   PlaybackSession get _session => widget.handle.session;
 
-  bool _measure() => _session.aspectKnown && _session.aspectRatio >= 1;
+  bool _measure() =>
+      _session.aspectKnown && _session.aspectRatio >= 1 && !_session.audio;
 
   bool get _television =>
       AppScope.formFactorOf(context) == FormFactor.television;
@@ -76,7 +80,13 @@ class _PlaybackPageState extends State<PlaybackPage> {
     _bind();
     _sync();
     final wide = _measure();
-    if (wide != _wideVideo) setState(() => _wideVideo = wide);
+    final audio = _session.audio;
+    if (wide != _wideVideo || audio != _audio) {
+      setState(() {
+        _wideVideo = wide;
+        _audio = audio;
+      });
+    }
     if (_session.locked != _locked) {
       _locked = _session.locked;
       _holdOrientation(_locked);
@@ -106,14 +116,20 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (!mounted) return;
     final session = _session;
     final playing = session.player.state.playing;
+    final iosVideo =
+        Platform.isIOS &&
+        !session.audio &&
+        (session.ready && session.aspectKnown || _pip.active);
     _pip.update(
       aspectRatio: session.aspectRatio,
       playing: playing,
       hasPrevious: session.hasPrevious,
       hasNext: session.hasNext,
+      iosPlayer: iosVideo ? session.player : null,
       autoEnter:
           playing &&
           !_television &&
+          !_audio &&
           widget.store.playbackPreferences.autoPictureInPicture,
     );
     _pip.resize(session.aspectRatio);
@@ -142,6 +158,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
 
   void _action(String action) {
     switch (action) {
+      case 'play':
+        if (!_session.player.state.playing) _session.togglePlayback();
+      case 'pause':
+        if (_session.player.state.playing) _session.togglePlayback();
       case 'toggle':
         _session.togglePlayback();
       case 'previous':
@@ -212,7 +232,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
   @override
   Widget build(BuildContext context) {
     final live = MediaQuery.of(context);
-    final shown = _pip.shown || _pip.leaving && live.size != _media?.size;
+    final shown =
+        !Platform.isIOS &&
+        (_pip.shown || _pip.leaving && live.size != _media?.size);
     if (!shown || _media == null) _media = live;
     return Stack(
       fit: StackFit.expand,
@@ -243,15 +265,27 @@ class _PlaybackPageState extends State<PlaybackPage> {
 
   Widget _page(BuildContext context) {
     final form = AppScope.formFactorOf(context);
-    final mini = _pip.available ? () => unawaited(_enterMini()) : null;
+    final mini = _pip.available && (!Platform.isIOS || !_audio)
+        ? () => unawaited(_enterMini())
+        : null;
+    if (_audio && form != FormFactor.television) {
+      return AudioPlayerPage(
+        store: widget.store,
+        handle: widget.handle,
+        onMiniWindow: mini,
+      );
+    }
     if (desktopPlatform) {
       final size = MediaQuery.sizeOf(context);
       return switch (form) {
-        FormFactor.phone when _wideVideo => LandscapePlayerPage(
-          store: widget.store,
-          handle: widget.handle,
-          onMiniWindow: mini,
-        ),
+        FormFactor.phone
+            when _wideVideo &&
+                !widget.store.playbackPreferences.portraitStyleForWide =>
+          LandscapePlayerPage(
+            store: widget.store,
+            handle: widget.handle,
+            onMiniWindow: mini,
+          ),
         FormFactor.phone => PortraitPlayerPage(
           store: widget.store,
           handle: widget.handle,

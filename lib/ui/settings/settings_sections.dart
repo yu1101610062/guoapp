@@ -9,6 +9,9 @@ import '../../app_device.dart';
 import '../../core_bridge.dart';
 import '../../download_preferences.dart';
 import '../../local_store.dart';
+import '../../media_controls.dart';
+import '../../mini_edge_snap.dart';
+import '../../models.dart';
 import '../../playback_preferences.dart';
 import '../../resource_settings.dart';
 import '../../resource_settings_editor.dart';
@@ -22,6 +25,7 @@ import '../widgets/form_text_field.dart';
 import '../widgets/group_card.dart';
 import 'appearance_settings.dart';
 import 'backup_actions.dart';
+import 'boss_key_tile.dart';
 import 'diary_view.dart';
 import 'settings_rows.dart';
 import 'storage_view.dart';
@@ -31,6 +35,7 @@ enum SettingsGroup {
   appearance('外观', Icons.palette_outlined),
   playback('播放', Icons.play_arrow_rounded),
   danmaku('弹幕', Icons.subtitles_outlined),
+  slacking('摸鱼', Icons.set_meal_outlined),
   download('下载', Icons.download_rounded),
   storage('存储', Icons.folder_outlined),
   proxy('代理', Icons.language_rounded),
@@ -42,6 +47,9 @@ enum SettingsGroup {
   const SettingsGroup(this.label, this.icon);
   final String label;
   final IconData icon;
+
+  bool get visible =>
+      this != slacking || Platform.isWindows || Platform.isMacOS;
 }
 
 typedef OpenSubpage = void Function(String title, WidgetBuilder body);
@@ -49,11 +57,17 @@ typedef OpenSubpage = void Function(String title, WidgetBuilder body);
 const adminOnly = '需要管理员';
 const _noDownload = '当前用户没有下载权限';
 const _proxyModes = {'auto': '自动', 'direct': '直连', 'manual': '手动代理'};
+const _sourceProxyModes = {'follow': '跟随全局', ..._proxyModes};
 const _counts = {1: '1', 2: '2', 3: '3', 4: '4', 5: '5', 6: '6'};
 const _decoders = {
   TelevisionDecoder.optimized: '默认',
   TelevisionDecoder.hardware: '硬解（兼容）',
   TelevisionDecoder.software: '软解（兼容）',
+};
+const _androidDecoders = {
+  ..._decoders,
+  TelevisionDecoder.hardwareSwapUv: '硬解（修正偏蓝）',
+  TelevisionDecoder.hardwareDirect: '硬解（直通）',
 };
 const _links = [
   [
@@ -64,6 +78,7 @@ const _links = [
     ('Telegram · 交流群组', String.fromEnvironment('TELEGRAM_GROUP_URL')),
     ('Telegram · 更新频道', String.fromEnvironment('TELEGRAM_CHANNEL_URL')),
   ],
+  [('感谢赞助 · mnyyds', 'https://github.com/mnyyds')],
 ];
 
 class SettingsSection extends StatelessWidget {
@@ -93,6 +108,7 @@ class SettingsSection extends StatelessWidget {
             children: switch (group) {
               SettingsGroup.playback => _playback(context),
               SettingsGroup.danmaku => _danmaku(context),
+              SettingsGroup.slacking => _slacking(context),
               SettingsGroup.download => _download(context),
               SettingsGroup.storage => _storage(),
               SettingsGroup.proxy => _proxy(context),
@@ -206,7 +222,7 @@ class SettingsSection extends StatelessWidget {
           ValueTile<TelevisionDecoder>(
             title: '解码方式',
             subtitle: '有声音没画面或卡顿时可换兼容方式，下次打开视频时生效',
-            options: _decoders,
+            options: Platform.isAndroid ? _androidDecoders : _decoders,
             value: preferences.televisionDecoder,
             onChanged: (decoder) => savePreferences(
               preferences.copyWith(televisionDecoder: decoder),
@@ -220,6 +236,25 @@ class SettingsSection extends StatelessWidget {
             onChanged: (value) =>
                 savePreferences(preferences.copyWith(preopen: value)),
           ),
+          if (!television)
+            SwitchTile(
+              title: '横屏视频也使用竖屏样式',
+              subtitle: Platform.isAndroid || Platform.isIOS
+                  ? '竖屏观看横屏视频时画面居中，上下滑动切集，点选集右边的按钮进入全屏'
+                  : '窗口竖长时横屏视频画面居中，滚轮切集，点选集右边的按钮进入全屏',
+              value: preferences.portraitStyleForWide,
+              onChanged: (value) => savePreferences(
+                preferences.copyWith(portraitStyleForWide: value),
+              ),
+            ),
+          if (!television)
+            SwitchTile(
+              title: '点开剧集直接播放',
+              subtitle: '跳过详情页直接进入播放，返回时回到列表',
+              value: preferences.directPlay,
+              onChanged: (value) =>
+                  savePreferences(preferences.copyWith(directPlay: value)),
+            ),
         ],
       ),
       if ((Platform.isAndroid || Platform.isIOS) && !television)
@@ -272,14 +307,6 @@ class SettingsSection extends StatelessWidget {
                   : null,
             ),
             SwitchTile(
-              title: '横屏视频也使用竖屏样式',
-              subtitle: '竖屏观看横屏视频时画面居中，上下滑动切集，点选集右边的按钮进入全屏',
-              value: preferences.portraitStyleForWide,
-              onChanged: (value) => savePreferences(
-                preferences.copyWith(portraitStyleForWide: value),
-              ),
-            ),
-            SwitchTile(
               title: '横屏底部进度线',
               subtitle: '横屏全屏播控隐藏后，在画面底边保留一条细进度线',
               value: preferences.progressLine,
@@ -306,7 +333,22 @@ class SettingsSection extends StatelessWidget {
           ),
         ],
       ),
-      if (Platform.isAndroid && !television)
+      if (MediaControls.supported)
+        SettingsCard(
+          children: [
+            SwitchTile(
+              title: '后台播放',
+              subtitle: Platform.isAndroid || Platform.isIOS
+                  ? '离开应用或锁屏后继续播放，可在通知栏、锁屏和耳机上控制'
+                  : '最小化后继续播放，可用键盘媒体键和系统媒体控件控制',
+              value: preferences.backgroundPlayback,
+              onChanged: (value) => savePreferences(
+                preferences.copyWith(backgroundPlayback: value),
+              ),
+            ),
+          ],
+        ),
+      if ((Platform.isAndroid || Platform.isIOS) && !television)
         SettingsCard(
           children: [
             SwitchTile(
@@ -336,6 +378,38 @@ class SettingsSection extends StatelessWidget {
         ),
     ];
   }
+
+  List<Widget> _slacking(BuildContext context) => [
+    SettingsCard(
+      children: [
+        const BossKeyTile(),
+        if (Platform.isWindows)
+          ValueListenableBuilder(
+            valueListenable: miniEdgeSnap,
+            builder: (context, enabled, _) => SwitchTile(
+              title: '小窗贴边隐藏',
+              subtitle: '小窗拖到屏幕边缘时自动收起，鼠标移到边缘展开',
+              value: enabled,
+              onChanged: (value) =>
+                  saveSetting(context, () => setMiniEdgeSnap(value)),
+            ),
+          ),
+        if (Platform.isWindows)
+          ListenableBuilder(
+            listenable: Listenable.merge([miniEdgeSnap, miniEdgePause]),
+            builder: (context, _) => SwitchTile(
+              title: '贴边自动暂停',
+              subtitle: '小窗贴边收起时暂停播放，展开后继续',
+              value: miniEdgePause.value,
+              onChanged: miniEdgeSnap.value
+                  ? (value) =>
+                        saveSetting(context, () => setMiniEdgePause(value))
+                  : null,
+            ),
+          ),
+      ],
+    ),
+  ];
 
   List<Widget> _download(BuildContext context) {
     final canDownload = store.canDownload;
@@ -496,7 +570,70 @@ class SettingsSection extends StatelessWidget {
             ),
         ],
       ),
+      if (settings != null) ..._sourceProxies(context, settings, editable),
     ];
+  }
+
+  List<Widget> _sourceProxies(
+    BuildContext context,
+    ResourceSettings settings,
+    bool editable,
+  ) {
+    final groups = <String, String>{
+      for (final site in SourceSite.allValues) site.groupId: site.groupName,
+    };
+    if (groups.isEmpty) return const [];
+    return [
+      const _Note('站源单独设置后，该站源的请求、播放与下载优先使用这里的方式'),
+      SettingsCard(
+        children: [
+          for (final MapEntry(key: group, value: name) in groups.entries) ...[
+            ValueTile<String>(
+              title: name,
+              options: _sourceProxyModes,
+              value: settings.sourceProxies[group]?.mode ?? 'follow',
+              onChanged: editable
+                  ? (value) => switch (value) {
+                      'manual' => _editSourceProxy(context, settings, group),
+                      'follow' => _saveResource(
+                        context,
+                        settings.withSourceProxy(group, null),
+                      ),
+                      _ => _saveResource(
+                        context,
+                        settings.withSourceProxy(group, SourceProxy(value)),
+                      ),
+                    }
+                  : null,
+            ),
+            if (settings.sourceProxies[group]?.mode == 'manual')
+              SettingsTile(
+                title: '$name · 代理地址',
+                value: '已设置',
+                enabled: editable,
+                onTap: () => _editSourceProxy(context, settings, group),
+              ),
+          ],
+        ],
+      ),
+    ];
+  }
+
+  Future<void> _editSourceProxy(
+    BuildContext context,
+    ResourceSettings settings,
+    String group,
+  ) async {
+    final address = await showDialog<String>(
+      context: context,
+      builder: (_) =>
+          _ProxyDialog(initial: settings.sourceProxies[group]?.url ?? ''),
+    );
+    if (address == null || !context.mounted) return;
+    await _saveResource(
+      context,
+      settings.withSourceProxy(group, SourceProxy('manual', address)),
+    );
   }
 
   Future<void> _editProxy(

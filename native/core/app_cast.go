@@ -357,14 +357,19 @@ func (engine *nativeEngine) castPlay(ctx context.Context, input nativeInput) (an
 	if err != nil {
 		return nil, err
 	}
-	local, token := stream.nativeOpen(*media)
+	local, token := stream.nativeOpen(SourceFromDramaID(input.Drama.ID), *media)
+	localURL, err := url.Parse(local)
+	if err != nil {
+		stream.nativeRelease(token)
+		return nil, err
+	}
 	if len(media.CENCKey) > 0 {
 		if err := stream.nativeDecrypt(ctx, token, *media); err != nil {
 			stream.nativeRelease(token)
 			return nil, err
 		}
 	}
-	address := origin + strings.TrimPrefix(local, stream.address)
+	address := origin + localURL.EscapedPath()
 	contentType := "video/mp4"
 	if strings.HasSuffix(local, ".m3u8") {
 		contentType = "application/vnd.apple.mpegurl"
@@ -433,9 +438,6 @@ func (engine *nativeEngine) nativeCast(ctx context.Context, input nativeInput) (
 	engine.cast.mu.Lock()
 	device, active := engine.cast.device, engine.cast.active
 	engine.cast.mu.Unlock()
-	if input.Command == "active" {
-		return map[string]bool{"active": active}, nil
-	}
 	if !active {
 		if input.Command == "stop" {
 			return true, nil

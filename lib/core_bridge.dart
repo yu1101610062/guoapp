@@ -60,6 +60,54 @@ String _nativeRequest(String body) {
   }
 }
 
+abstract final class _NativeWorkers {
+  static const _maxIdle = 8;
+  static final _idle = <SendPort>[];
+
+  static Future<Map<String, dynamic>> request(String body) async {
+    final worker = _idle.isNotEmpty ? _idle.removeLast() : await _spawn();
+    final reply = ReceivePort();
+    worker.send((body, reply.sendPort));
+    final (result, error, stack) =
+        await reply.first as (Map<String, dynamic>?, Object?, StackTrace?);
+    if (_idle.length < _maxIdle) {
+      _idle.add(worker);
+    } else {
+      worker.send(null);
+    }
+    if (error != null) Error.throwWithStackTrace(error, stack!);
+    return result!;
+  }
+
+  static Future<SendPort> _spawn() async {
+    final ready = ReceivePort();
+    await Isolate.spawn(_serve, ready.sendPort);
+    return await ready.first as SendPort;
+  }
+
+  static void _serve(SendPort ready) {
+    final requests = ReceivePort();
+    ready.send(requests.sendPort);
+    requests.listen((message) {
+      if (message == null) return requests.close();
+      final (body, reply) = message as (String, SendPort);
+      try {
+        reply.send((
+          jsonDecode(_nativeRequest(body)) as Map<String, dynamic>,
+          null,
+          null,
+        ));
+      } catch (error, stack) {
+        try {
+          reply.send((null, error, stack));
+        } catch (_) {
+          reply.send((null, RemoteError('$error', '$stack'), stack));
+        }
+      }
+    });
+  }
+}
+
 class AppFailure implements Exception {
   AppFailure(this.message, {this.code = ''});
   final String message;
@@ -91,7 +139,6 @@ abstract class AppRepository {
   }) async => throw AppFailure('当前环境不支持投屏');
   Future<CastStatus> castStatus() async => throw AppFailure('当前环境不支持投屏');
   Future<void> castControl(String command, {double position = 0}) async {}
-  Future<bool> castActive() async => false;
   Future<void> cancelDanmaku() async {}
   Future<DanmakuPage> danmaku(
     PlaybackPlan plan, {
@@ -205,11 +252,13 @@ abstract class AppRepository {
     int page = 1,
     String query = '',
     String category = '',
+    String lane = '',
     bool force = false,
   });
   Future<CatalogPage> cached(String source, {String category = ''});
   Future<String> cover(Drama drama, {bool force = false});
   bool coverCached(Drama drama) => false;
+  String? knownCover(Drama drama) => null;
   Future<DramaDetail> detail(Drama drama);
   Future<PlaybackPlan> resolve(Drama drama, Episode episode, {int quality = 0});
   Future<PlaybackPlan> fallback(PlaybackPlan current);
@@ -350,11 +399,6 @@ class NativeRepository extends AppRepository {
     int quality = 0,
     double position = 0,
   }) async {
-    try {
-      await BackgroundDownloads.ensureStarted();
-    } on AppFailure {
-      DiaryService.add('[Cast] 后台服务未启动，应用退到后台后投屏可能中断');
-    }
     await _call({
       'action': 'cast',
       'command': 'play',
@@ -385,10 +429,6 @@ class NativeRepository extends AppRepository {
       'startMs': (position * 1000).round(),
     });
   }
-
-  @override
-  Future<bool> castActive() async =>
-      (await _call({'action': 'cast', 'command': 'active'}))['active'] == true;
 
   @override
   Future<void> cancelCatalog() => _cancelReads('catalog-');
@@ -716,20 +756,17 @@ class NativeRepository extends AppRepository {
         input['force'] = true;
       }
       final body = jsonEncode(input);
-      final response =
-          await Isolate.run(
-            () => jsonDecode(_nativeRequest(body)) as Map<String, dynamic>,
-          ).timeout(
-            Duration(
-              seconds: action == 'moveDownloads' || action == 'deleteAllData'
-                  ? 620
-                  : action == 'danmaku'
-                  ? 15
-                  : action == 'preload'
-                  ? 20
-                  : 70,
-            ),
-          );
+      final response = await _NativeWorkers.request(body).timeout(
+        Duration(
+          seconds: action == 'moveDownloads' || action == 'deleteAllData'
+              ? 620
+              : action == 'danmaku'
+              ? 15
+              : action == 'preload'
+              ? 20
+              : 70,
+        ),
+      );
       if (response['ok'] != true) {
         throw AppFailure(
           response['error'] as String? ?? '读取失败，请重试',
@@ -930,16 +967,24 @@ class NativeRepository extends AppRepository {
     int page = 1,
     String query = '',
     String category = '',
+    String lane = '',
     bool force = false,
   }) async => CatalogPage.fromJson(
-    await _read(query.isEmpty ? 'catalog-$source' : 'catalog-$source-search', {
-      'action': 'catalog',
-      'source': source,
-      'page': page,
-      'query': query,
-      'category': category,
-      'force': force,
-    }),
+    await _read(
+      switch ((query.isEmpty, lane.isEmpty)) {
+        (false, _) => 'catalog-$source-search',
+        (true, true) => 'catalog-$source',
+        (true, false) => 'catalog-$source-$lane',
+      },
+      {
+        'action': 'catalog',
+        'source': source,
+        'page': page,
+        'query': query,
+        'category': category,
+        'force': force,
+      },
+    ),
   );
   @override
   Future<CatalogPage> cached(String source, {String category = ''}) async =>
@@ -953,6 +998,10 @@ class NativeRepository extends AppRepository {
   @override
   bool coverCached(Drama drama) =>
       _coverPaths.containsKey('${drama.id}\u0000${drama.cover}');
+
+  @override
+  String? knownCover(Drama drama) =>
+      _coverPaths['${drama.id}\u0000${drama.cover}'];
 
   @override
   Future<String> cover(Drama drama, {bool force = false}) async {
